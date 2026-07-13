@@ -12,6 +12,7 @@ import type { NavigateToWorkspaceInput } from "@/stores/navigation-active-worksp
 
 const SERVER_ID = "server-1";
 const PROJECT_PATH = "/repo/project";
+const WORKTREE_PATH = "/repo-worktrees/feature-a";
 
 function buildProjectPayload() {
   return {
@@ -121,6 +122,14 @@ describe("openProjectDirectly", () => {
       isConnected: true,
       canAddProject: true,
       client: {
+        getCheckoutStatus: async () =>
+          ({
+            isGit: true,
+            mainRepoRoot: null,
+          }) as never,
+        createWorkspace: async () => {
+          throw new Error("createWorkspace should not be called");
+        },
         addProject: async () => ({
           requestId: "request-1",
           error: null,
@@ -128,10 +137,11 @@ describe("openProjectDirectly", () => {
         }),
       },
       addEmptyProject: session.addEmptyProject,
+      mergeWorkspaces: session.mergeWorkspaces,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, workspaceId: null });
     expect(session.projects).toEqual([
       {
         serverId: SERVER_ID,
@@ -148,6 +158,78 @@ describe("openProjectDirectly", () => {
     expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
   });
 
+  it("opens an existing git worktree as a workspace instead of adding the project again", async () => {
+    const session = createFakeSession();
+    let addProjectCalled = false;
+
+    const result = await openProjectDirectly({
+      serverId: SERVER_ID,
+      projectPath: WORKTREE_PATH,
+      isConnected: true,
+      canAddProject: true,
+      client: {
+        getCheckoutStatus: async () =>
+          ({
+            isGit: true,
+            mainRepoRoot: "/repo/project",
+          }) as never,
+        createWorkspace: async () => ({
+          requestId: "request-worktree",
+          error: null,
+          setupTerminalId: null,
+          workspace: {
+            id: "wks_feature_a",
+            projectId: "project-1",
+            projectDisplayName: "project",
+            projectCustomName: null,
+            projectRootPath: "/repo/project",
+            workspaceDirectory: WORKTREE_PATH,
+            projectKind: "git",
+            workspaceKind: "worktree",
+            name: "feature-a",
+            title: null,
+            archivingAt: null,
+            status: "done",
+            statusEnteredAt: null,
+            activityAt: null,
+            diffStat: null,
+            scripts: [],
+            gitRuntime: null,
+            githubRuntime: null,
+          },
+        }),
+        addProject: async () => {
+          addProjectCalled = true;
+          return {
+            requestId: "request-unexpected",
+            error: null,
+            project: buildProjectPayload(),
+          };
+        },
+      },
+      addEmptyProject: session.addEmptyProject,
+      mergeWorkspaces: session.mergeWorkspaces,
+      setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
+    });
+
+    expect(result).toEqual({ ok: true, workspaceId: "wks_feature_a" });
+    expect(addProjectCalled).toBe(false);
+    expect(session.projects).toEqual([]);
+    expect(session.merges).toEqual([
+      {
+        serverId: SERVER_ID,
+        workspaces: [
+          expect.objectContaining({
+            id: "wks_feature_a",
+            workspaceDirectory: WORKTREE_PATH,
+            workspaceKind: "worktree",
+          }),
+        ],
+      },
+    ]);
+    expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
+  });
+
   it("fails before sending when the host does not support adding projects without workspaces", async () => {
     const session = createFakeSession();
     const result = await openProjectDirectly({
@@ -156,6 +238,12 @@ describe("openProjectDirectly", () => {
       isConnected: true,
       canAddProject: false,
       client: {
+        getCheckoutStatus: async () => {
+          throw new Error("getCheckoutStatus should not be called");
+        },
+        createWorkspace: async () => {
+          throw new Error("createWorkspace should not be called");
+        },
         addProject: async () => ({
           requestId: "request-unsupported",
           error: null,
@@ -163,6 +251,7 @@ describe("openProjectDirectly", () => {
         }),
       },
       addEmptyProject: session.addEmptyProject,
+      mergeWorkspaces: session.mergeWorkspaces,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
@@ -184,6 +273,14 @@ describe("openProjectDirectly", () => {
       isConnected: true,
       canAddProject: true,
       client: {
+        getCheckoutStatus: async () =>
+          ({
+            isGit: true,
+            mainRepoRoot: null,
+          }) as never,
+        createWorkspace: async () => {
+          throw new Error("createWorkspace should not be called");
+        },
         addProject: async () => ({
           requestId: "request-2",
           error: "Directory not found: /repo/project",
@@ -192,6 +289,7 @@ describe("openProjectDirectly", () => {
         }),
       },
       addEmptyProject: session.addEmptyProject,
+      mergeWorkspaces: session.mergeWorkspaces,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 

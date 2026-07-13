@@ -1,0 +1,19 @@
+name = "paseo-app"
+main = "src/index.ts"
+compatibility_date = "2026-07-08"
+
+[observability]
+enabled = true
+
+[assets]
+directory = "../app/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[[durable_objects.bindings]]
+name = "USER_SYNC"
+class_name = "UserSyncDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserSyncDurableObject"]

@@ -1331,7 +1331,7 @@ export class HostRuntimeController {
   }
 }
 
-const REGISTRY_STORAGE_KEY = "@paseo:daemon-registry";
+export const HOST_REGISTRY_STORAGE_KEY = "@paseo:daemon-registry";
 const LOCALHOST_FALLBACK_ENDPOINT = "localhost:6767";
 const DEFAULT_LOCALHOST_BOOTSTRAP_TIMEOUT_MS = 2500;
 const E2E_STORAGE_KEY = "@paseo:e2e";
@@ -1487,7 +1487,7 @@ export class HostRuntimeStore {
   private async loadFromStorage(): Promise<void> {
     let shouldPersistHosts = false;
     try {
-      const stored = await this.storage.getItem(REGISTRY_STORAGE_KEY);
+      const stored = await this.storage.getItem(HOST_REGISTRY_STORAGE_KEY);
       if (!stored) {
         return;
       }
@@ -1521,6 +1521,13 @@ export class HostRuntimeStore {
     }
     this.hostRegistryLoaded = true;
     this.emitHostList();
+  }
+
+  async reloadFromStorage(): Promise<void> {
+    this.hosts = [];
+    this.syncHosts([]);
+    await this.loadFromStorage();
+    this.markHostRegistryLoaded();
   }
 
   private async bootstrapDefaultLocalhost(): Promise<void> {
@@ -1896,7 +1903,7 @@ export class HostRuntimeStore {
 
   private async persistHosts(): Promise<void> {
     try {
-      await this.storage.setItem(REGISTRY_STORAGE_KEY, JSON.stringify(this.hosts));
+      await this.storage.setItem(HOST_REGISTRY_STORAGE_KEY, JSON.stringify(this.hosts));
     } catch (error) {
       console.error("[HostRuntime] Failed to persist host registry", error);
     }

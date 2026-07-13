@@ -87,6 +87,7 @@ import {
 import { getDaemonStartService } from "@/runtime/daemon-start-service";
 import { applyAppearance } from "@/screens/settings/appearance/apply-appearance";
 import { selectIsAgentListOpen, usePanelStore } from "@/stores/panel-store";
+import { CloudSyncProvider } from "@/sync/provider";
 import { THEME_TO_UNISTYLES, type ThemeName } from "@/styles/theme";
 import type { HostProfile } from "@/types/host-connection";
 import { toggleDesktopSidebarsWithCheckoutIntent } from "@/utils/desktop-sidebar-toggle";
@@ -846,6 +847,7 @@ function RuntimeProviders({ children }: { children: ReactNode }) {
       <PushNotificationRouter />
       <SidebarCalloutProvider>
         <ToastProvider>
+          <CloudSyncProvider />
           <ProvidersWrapper>{children}</ProvidersWrapper>
         </ToastProvider>
       </SidebarCalloutProvider>

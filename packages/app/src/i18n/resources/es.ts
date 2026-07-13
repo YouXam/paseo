@@ -1548,6 +1548,68 @@ export const es: TranslationResources = {
           zhCN: "中文",
         },
       },
+      cloudSync: {
+        title: "Sincronización en la nube",
+        rowTitle: "Sincronización cifrada del estado de la interfaz",
+        rowHint:
+          "Sincroniza hosts, pestañas del espacio de trabajo, diseño, configuración y borradores de texto. Los bytes de adjuntos no se sincronizan.",
+        endpoint: {
+          label: "Endpoint de sincronización",
+          hint: "Ejemplo: https://sync.example.com",
+          placeholder: "https://sync.example.com",
+        },
+        username: {
+          label: "Nombre de usuario",
+          placeholder: "Nombre de usuario",
+        },
+        password: {
+          label: "Contraseña maestra",
+          placeholder: "Contraseña",
+        },
+        status: {
+          disabled: "Sin configurar",
+          signedOut: "Sesión cerrada",
+          authenticating: "Iniciando sesión...",
+          syncing: "Sincronizando...",
+          synced: "Sincronizado",
+          error: "Error de sincronización",
+        },
+        lastSyncNever: "Nunca sincronizado",
+        signedInDetails: "{{username}} · revisión {{revision}} · {{lastSync}}",
+        signedOutHint:
+          "Regístrate o inicia sesión con la misma contraseña maestra usada para cifrar.",
+        actions: {
+          push: "Subir",
+          pull: "Bajar",
+          signOut: "Cerrar sesión",
+          signIn: "Iniciar sesión",
+          register: "Registrarse",
+        },
+        errorTitle: "Falló la sincronización en la nube",
+        errors: {
+          signInRequired: "Inicia sesión antes de sincronizar.",
+          endpointRequired: "El endpoint de sincronización es obligatorio.",
+          usernameRequired: "El nombre de usuario es obligatorio.",
+          passwordRequired: "La contraseña es obligatoria.",
+          webCryptoRequired:
+            "La sincronización en la nube requiere soporte de Web Crypto en este entorno.",
+          unsupportedSnapshot: "La instantánea cifrada de sincronización no es compatible.",
+          invalidSnapshot: "La instantánea de sincronización en la nube no es válida.",
+          revisionConflict:
+            "Hay un conflicto de revisión. Baja el estado más reciente y reintenta.",
+          missingBearerToken: "Falta el token bearer.",
+          invalidBearerToken: "La sesión no es válida o caducó. Inicia sesión de nuevo.",
+          userNotFound: "Usuario no encontrado.",
+          invalidJsonBody: "El cuerpo de la solicitud de sincronización no es válido.",
+          invalidUsername: "Nombre de usuario no válido.",
+          userAlreadyExists: "El usuario ya existe.",
+          invalidCredentials: "Nombre de usuario o contraseña no válidos.",
+          invalidBaseRevision: "Revisión base no válida.",
+          notFound: "Endpoint de sincronización no encontrado.",
+          internalServerError: "Error del servidor de sincronización.",
+          requestFailed: "Falló la solicitud de sincronización ({{status}}).",
+        },
+      },
     },
     diagnostics: {
       title: "Diagnóstico",

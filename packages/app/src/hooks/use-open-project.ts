@@ -21,6 +21,7 @@ export function useOpenProject(
       : false,
   );
   const addEmptyProject = useSessionStore((state) => state.addEmptyProject);
+  const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -32,8 +33,15 @@ export function useOpenProject(
         canAddProject,
         client,
         addEmptyProject,
+        mergeWorkspaces,
         setHasHydratedWorkspaces,
       });
+      if (result.ok && result.workspaceId) {
+        navigateToWorkspace({
+          serverId: normalizedServerId,
+          workspaceId: result.workspaceId,
+        });
+      }
       return result;
     },
     [
@@ -41,6 +49,7 @@ export function useOpenProject(
       canAddProject,
       client,
       isConnected,
+      mergeWorkspaces,
       normalizedServerId,
       setHasHydratedWorkspaces,
     ],
