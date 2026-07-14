@@ -87,9 +87,22 @@ archive_path="$tmp_dir/$BUNDLE"
 
 echo "Downloading $ARCHIVE_URL"
 if command -v curl >/dev/null 2>&1; then
-  curl -fL "$ARCHIVE_URL" -o "$archive_path"
+  curl \\
+    --fail \\
+    --location \\
+    --retry 5 \\
+    --retry-delay 2 \\
+    --retry-connrefused \\
+    --connect-timeout 30 \\
+    --max-time 300 \\
+    "$ARCHIVE_URL" \\
+    -o "$archive_path"
 elif command -v wget >/dev/null 2>&1; then
-  wget -O "$archive_path" "$ARCHIVE_URL"
+  wget \\
+    --tries=5 \\
+    --timeout=30 \\
+    -O "$archive_path" \\
+    "$ARCHIVE_URL"
 else
   echo "curl or wget is required to download Paseo daemon tarballs." >&2
   exit 1
