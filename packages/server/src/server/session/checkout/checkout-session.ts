@@ -5,7 +5,9 @@ import type {
   BranchSuggestionsRequest,
   CheckoutRefreshRequest,
   CheckoutRenameBranchRequest,
+  CheckoutStageFileRequest,
   CheckoutStatusRequest,
+  CheckoutUnstageFileRequest,
   SessionInboundMessage,
   SessionOutboundMessage,
   SubscribeCheckoutDiffRequest,
@@ -41,6 +43,8 @@ import {
   mergeToBase,
   pullCurrentBranch,
   pushCurrentBranch,
+  stageFile,
+  unstageFile,
 } from "../../../utils/checkout-git.js";
 import { execCommand } from "../../../utils/spawn.js";
 import { expandTilde } from "../../../utils/path.js";
@@ -91,6 +95,7 @@ export interface CheckoutSessionOptions {
   github: GitHubService;
   checkoutDiffManager: CheckoutDiffSubscriber;
   gitMetadataGenerator: GitMetadataGenerator;
+  supportsCheckoutDiffChangeSources?: () => boolean;
   paseoHome: string;
   worktreesRoot: string | undefined;
   logger: pino.Logger;
@@ -118,6 +123,7 @@ export class CheckoutSession {
   private readonly github: GitHubService;
   private readonly checkoutDiffManager: CheckoutDiffSubscriber;
   private readonly gitMetadataGenerator: GitMetadataGenerator;
+  private readonly supportsCheckoutDiffChangeSources: () => boolean;
   private readonly paseoHome: string;
   private readonly worktreesRoot: string | undefined;
   private readonly logger: pino.Logger;
@@ -130,6 +136,8 @@ export class CheckoutSession {
     this.github = options.github;
     this.checkoutDiffManager = options.checkoutDiffManager;
     this.gitMetadataGenerator = options.gitMetadataGenerator;
+    this.supportsCheckoutDiffChangeSources =
+      options.supportsCheckoutDiffChangeSources ?? (() => false);
     this.paseoHome = options.paseoHome;
     this.worktreesRoot = options.worktreesRoot;
     this.logger = options.logger;
@@ -269,20 +277,21 @@ export class CheckoutSession {
 
   async handleSubscribeDiffRequest(msg: SubscribeCheckoutDiffRequest): Promise<void> {
     const cwd = expandTilde(msg.cwd);
+    const compare: CheckoutDiffCompareInput = {
+      ...msg.compare,
+      ...(this.supportsCheckoutDiffChangeSources() ? { includeChangeSources: true } : {}),
+    };
     this.diffSubscriptions.get(msg.subscriptionId)?.();
     this.diffSubscriptions.delete(msg.subscriptionId);
-    const subscription = await this.checkoutDiffManager.subscribe(
-      { cwd, compare: msg.compare },
-      (snapshot) => {
-        this.host.emit({
-          type: "checkout_diff_update",
-          payload: {
-            subscriptionId: msg.subscriptionId,
-            ...snapshot,
-          },
-        });
-      },
-    );
+    const subscription = await this.checkoutDiffManager.subscribe({ cwd, compare }, (snapshot) => {
+      this.host.emit({
+        type: "checkout_diff_update",
+        payload: {
+          subscriptionId: msg.subscriptionId,
+          ...snapshot,
+        },
+      });
+    });
     this.diffSubscriptions.set(msg.subscriptionId, subscription.unsubscribe);
 
     this.host.emit({
@@ -732,6 +741,70 @@ export class CheckoutSession {
         type: "checkout_push_response",
         payload: {
           cwd,
+          success: false,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutStageFileRequest(msg: CheckoutStageFileRequest): Promise<void> {
+    const { cwd, path, requestId } = msg;
+
+    try {
+      await stageFile(cwd, path);
+      await this.gitMutation.notifyGitMutation(cwd, "stage-file");
+      this.scheduleDiffRefresh(cwd);
+
+      this.host.emit({
+        type: "checkout.stage_file.response",
+        payload: {
+          cwd,
+          path,
+          success: true,
+          error: null,
+          requestId,
+        },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.stage_file.response",
+        payload: {
+          cwd,
+          path,
+          success: false,
+          error: toCheckoutError(error),
+          requestId,
+        },
+      });
+    }
+  }
+
+  async handleCheckoutUnstageFileRequest(msg: CheckoutUnstageFileRequest): Promise<void> {
+    const { cwd, path, requestId } = msg;
+
+    try {
+      await unstageFile(cwd, path);
+      await this.gitMutation.notifyGitMutation(cwd, "unstage-file");
+      this.scheduleDiffRefresh(cwd);
+
+      this.host.emit({
+        type: "checkout.unstage_file.response",
+        payload: {
+          cwd,
+          path,
+          success: true,
+          error: null,
+          requestId,
+        },
+      });
+    } catch (error) {
+      this.host.emit({
+        type: "checkout.unstage_file.response",
+        payload: {
+          cwd,
+          path,
           success: false,
           error: toCheckoutError(error),
           requestId,

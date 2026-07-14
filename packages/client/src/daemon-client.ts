@@ -34,6 +34,8 @@ import type {
   CheckoutMergeFromBaseResponse,
   CheckoutPullResponse,
   CheckoutPushResponse,
+  CheckoutStageFileResponse,
+  CheckoutUnstageFileResponse,
   CheckoutRefreshResponse,
   CheckoutPrCreateResponse,
   CheckoutPrMergeResponse,
@@ -313,6 +315,8 @@ type CheckoutMergePayload = CheckoutMergeResponse["payload"];
 type CheckoutMergeFromBasePayload = CheckoutMergeFromBaseResponse["payload"];
 type CheckoutPullPayload = CheckoutPullResponse["payload"];
 type CheckoutPushPayload = CheckoutPushResponse["payload"];
+type CheckoutStageFilePayload = CheckoutStageFileResponse["payload"];
+type CheckoutUnstageFilePayload = CheckoutUnstageFileResponse["payload"];
 type CheckoutRefreshPayload = CheckoutRefreshResponse["payload"];
 type CheckoutPrCreatePayload = CheckoutPrCreateResponse["payload"];
 type CheckoutPrMergePayload = CheckoutPrMergeResponse["payload"];
@@ -3355,6 +3359,38 @@ export class DaemonClient {
     });
   }
 
+  async checkoutStageFile(
+    cwd: string,
+    path: string,
+    requestId?: string,
+  ): Promise<CheckoutStageFilePayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "checkout.stage_file.request",
+        cwd,
+        path,
+      },
+      responseType: "checkout.stage_file.response",
+    });
+  }
+
+  async checkoutUnstageFile(
+    cwd: string,
+    path: string,
+    requestId?: string,
+  ): Promise<CheckoutUnstageFilePayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "checkout.unstage_file.request",
+        cwd,
+        path,
+      },
+      responseType: "checkout.unstage_file.response",
+    });
+  }
+
   async checkoutRefresh(cwd: string, requestId?: string): Promise<CheckoutRefreshPayload> {
     return this.sendCorrelatedSessionRequest({
       requestId,
@@ -4797,6 +4833,7 @@ export class DaemonClient {
             [CLIENT_CAPS.reasoningMergeEnum]: true,
             [CLIENT_CAPS.terminalReflowableSnapshot]: true,
             [CLIENT_CAPS.providerSubagents]: true,
+            [CLIENT_CAPS.checkoutDiffChangeSources]: true,
             ...this.config.capabilities,
           },
           ...(this.config.appVersion ? { appVersion: this.config.appVersion } : {}),

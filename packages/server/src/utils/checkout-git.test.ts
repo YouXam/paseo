@@ -287,6 +287,59 @@ describe("checkout git utilities", () => {
         status: "ok",
       },
     ]);
+
+    const changeSourceDiff = await getCheckoutDiff(unbornRepo, {
+      mode: "uncommitted",
+      includeStructured: true,
+      includeChangeSources: true,
+    });
+
+    expect(changeSourceDiff.structured?.[0]?.changeSource).toBe("unstaged");
+  });
+
+  it("keeps uncommitted structured diffs legacy-shaped unless change sources are requested", async () => {
+    writeFileSync(join(repoDir, "both.txt"), "base\n");
+    execFileSync("git", ["add", "both.txt"], { cwd: repoDir });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "add both"], {
+      cwd: repoDir,
+    });
+
+    writeFileSync(join(repoDir, "both.txt"), "base\nstaged\n");
+    execFileSync("git", ["add", "both.txt"], { cwd: repoDir });
+    writeFileSync(join(repoDir, "both.txt"), "base\nstaged\nunstaged\n");
+
+    const legacyDiff = await getCheckoutDiff(repoDir, {
+      mode: "uncommitted",
+      includeStructured: true,
+    });
+    expect(legacyDiff.structured?.map((file) => [file.path, file.changeSource ?? null])).toEqual([
+      ["both.txt", null],
+    ]);
+    expect(legacyDiff.structured?.[0]?.hunks[0]?.lines).toEqual(
+      expect.arrayContaining([
+        { type: "add", content: "staged" },
+        { type: "add", content: "unstaged" },
+      ]),
+    );
+
+    const changeSourceDiff = await getCheckoutDiff(repoDir, {
+      mode: "uncommitted",
+      includeStructured: true,
+      includeChangeSources: true,
+    });
+    const changedFilesBySource = changeSourceDiff.structured?.map((file) => {
+      const addedLines: string[] = [];
+      for (const line of file.hunks[0]?.lines ?? []) {
+        if (line.type === "add") {
+          addedLines.push(line.content);
+        }
+      }
+      return [file.changeSource ?? null, file.path, addedLines];
+    });
+    expect(changedFilesBySource).toEqual([
+      ["staged", "both.txt", ["staged"]],
+      ["unstaged", "both.txt", ["unstaged"]],
+    ]);
   });
 
   it("returns the branch being rebased when HEAD is detached during a rebase", async () => {

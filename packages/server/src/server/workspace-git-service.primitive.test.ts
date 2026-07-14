@@ -1543,14 +1543,18 @@ describe("WorkspaceGitServiceImpl D2 read methods", () => {
     });
     execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir, stdio: "pipe" });
     writeFileSync(join(repoDir, "tracked.txt"), "before\n");
-    execFileSync("git", ["add", "tracked.txt"], { cwd: repoDir, stdio: "pipe" });
+    writeFileSync(join(repoDir, "both.txt"), "before\n");
+    execFileSync("git", ["add", "tracked.txt", "both.txt"], { cwd: repoDir, stdio: "pipe" });
     execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "initial"], {
       cwd: repoDir,
       stdio: "pipe",
     });
     writeFileSync(join(repoDir, "tracked.txt"), "before\nafter\n");
+    writeFileSync(join(repoDir, "both.txt"), "before\nstaged\n");
     writeFileSync(join(repoDir, "staged.txt"), "staged\n");
-    execFileSync("git", ["add", "staged.txt"], { cwd: repoDir, stdio: "pipe" });
+    execFileSync("git", ["add", "both.txt", "staged.txt"], { cwd: repoDir, stdio: "pipe" });
+    writeFileSync(join(repoDir, "both.txt"), "before\nstaged\nunstaged\n");
+    writeFileSync(join(repoDir, "untracked.txt"), "untracked\n");
 
     const service = createService({
       getCheckoutDiff: getCheckoutDiffUncached as never,
@@ -1560,13 +1564,19 @@ describe("WorkspaceGitServiceImpl D2 read methods", () => {
       const diff = await service.getCheckoutDiff(repoDir, {
         mode: "uncommitted",
         includeStructured: true,
+        includeChangeSources: true,
       });
 
       expect(diff.diff).toContain("tracked.txt");
       expect(diff.diff).toContain("staged.txt");
-      expect(diff.structured?.map((file) => file.path).sort()).toEqual([
-        "staged.txt",
-        "tracked.txt",
+      expect(diff.diff).toContain("both.txt");
+      expect(diff.diff).toContain("untracked.txt");
+      expect(diff.structured?.map((file) => `${file.changeSource}:${file.path}`)).toEqual([
+        "staged:both.txt",
+        "staged:staged.txt",
+        "unstaged:both.txt",
+        "unstaged:tracked.txt",
+        "unstaged:untracked.txt",
       ]);
     } finally {
       service.dispose();

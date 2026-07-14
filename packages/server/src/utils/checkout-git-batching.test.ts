@@ -22,7 +22,7 @@ vi.mock("child_process", async () => {
           normalizedArgs[0] === "-c" && normalizedArgs[1] === "core.quotepath=false" ? 2 : 0;
         const isTrackedTextDiff =
           normalizedArgs[subcommandIndex] === "diff" &&
-          normalizedArgs.includes("HEAD") &&
+          normalizedArgs.includes("--") &&
           !normalizedArgs.includes("--numstat") &&
           !normalizedArgs.includes("--no-index") &&
           !normalizedArgs.includes("--shortstat") &&

@@ -85,6 +85,7 @@ function makeCheckoutSession(options?: {
   host?: Partial<CheckoutSessionHost>;
   gitMutation?: Partial<GitMutationFake>;
   gitMetadataGenerator?: Partial<GitMetadataGenerator>;
+  supportsCheckoutDiffChangeSources?: boolean;
 }) {
   const emitted: SessionOutboundMessage[] = [];
   const hostCalls: RecordedHostCalls = {
@@ -144,6 +145,7 @@ function makeCheckoutSession(options?: {
     checkoutDiffManager:
       options?.diff ?? createFakeDiffSubscriber({ cwd: "", files: [], error: null }).subscriber,
     gitMetadataGenerator,
+    supportsCheckoutDiffChangeSources: () => options?.supportsCheckoutDiffChangeSources === true,
     paseoHome: "/tmp/paseo-home",
     worktreesRoot: undefined,
     logger: pino({ level: "silent" }),
@@ -442,6 +444,7 @@ describe("CheckoutSession", () => {
         },
       ]);
       expect(subscriptions).toHaveLength(1);
+      expect(subscriptions[0].compare).toEqual({ mode: "uncommitted" });
 
       subscriptions[0].listener({
         cwd: "/repo",
@@ -465,6 +468,46 @@ describe("CheckoutSession", () => {
       });
 
       expect(subscriptions[0].unsubscribeCalls).toBe(1);
+    });
+
+    it("requests staged and unstaged diff entries only for capable clients", async () => {
+      const legacy = createFakeDiffSubscriber({
+        cwd: "/repo",
+        files: [],
+        error: null,
+      });
+      const capable = createFakeDiffSubscriber({
+        cwd: "/repo",
+        files: [],
+        error: null,
+      });
+
+      const { checkout: legacyCheckout } = makeCheckoutSession({ diff: legacy.subscriber });
+      const { checkout: capableCheckout } = makeCheckoutSession({
+        diff: capable.subscriber,
+        supportsCheckoutDiffChangeSources: true,
+      });
+
+      await legacyCheckout.handleSubscribeDiffRequest({
+        type: "subscribe_checkout_diff_request",
+        subscriptionId: "legacy",
+        cwd: "/repo",
+        compare: { mode: "uncommitted" },
+        requestId: "legacy-request",
+      });
+      await capableCheckout.handleSubscribeDiffRequest({
+        type: "subscribe_checkout_diff_request",
+        subscriptionId: "capable",
+        cwd: "/repo",
+        compare: { mode: "uncommitted" },
+        requestId: "capable-request",
+      });
+
+      expect(legacy.subscriptions[0].compare).toEqual({ mode: "uncommitted" });
+      expect(capable.subscriptions[0].compare).toEqual({
+        mode: "uncommitted",
+        includeChangeSources: true,
+      });
     });
 
     it("replaces an existing subscription when the same id subscribes again", async () => {

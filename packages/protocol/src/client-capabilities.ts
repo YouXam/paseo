@@ -14,6 +14,10 @@ export const CLIENT_CAPS = {
   // COMPAT(providerSubagents): added in v0.1.107. The daemon emits provider-owned
   // child descriptors and timelines only to clients that understand the new messages.
   providerSubagents: "provider_subagents",
+  // COMPAT(checkoutDiffChangeSources): added in v0.1.108. The daemon only emits
+  // staged/unstaged split diff entries, including duplicate paths with different
+  // changeSource values, to clients that can key and render those entries safely.
+  checkoutDiffChangeSources: "checkout_diff_change_sources",
   browserHost: "browser_host",
 } as const;
 

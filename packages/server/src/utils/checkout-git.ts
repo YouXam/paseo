@@ -32,6 +32,8 @@ const READ_ONLY_GIT_ENV = {
  */
 export type GitMutationRefreshReason =
   | "commit-changes"
+  | "stage-file"
+  | "unstage-file"
   | "pull"
   | "push"
   | "merge-to-base"
@@ -176,16 +178,21 @@ interface CheckoutFileChange {
   isNew: boolean;
   isDeleted: boolean;
   isUntracked?: boolean;
+  changeSource?: DiffChangeSource;
 }
 
+type DiffChangeSource = NonNullable<ParsedDiffFile["changeSource"]>;
+
 interface CheckoutDiffRefs {
-  baseRef: string;
+  diffArgs: string[];
+  baseRef?: string;
   targetRef?: string;
   includeUntracked: boolean;
+  changeSource?: DiffChangeSource;
 }
 
 function getCheckoutDiffRefArgs(refs: CheckoutDiffRefs): string[] {
-  return [refs.baseRef, ...(refs.targetRef ? [refs.targetRef] : [])];
+  return refs.diffArgs;
 }
 
 function normalizeBranchSuggestionName(raw: string): string | null {
@@ -474,6 +481,7 @@ async function listCheckoutFileChanges(
           status: rawStatus,
           isNew: false,
           isDeleted: false,
+          ...(refs.changeSource ? { changeSource: refs.changeSource } : {}),
         });
       }
       continue;
@@ -487,6 +495,7 @@ async function listCheckoutFileChanges(
       status: rawStatus,
       isNew: code === "A",
       isDeleted: code === "D",
+      ...(refs.changeSource ? { changeSource: refs.changeSource } : {}),
     });
   }
 
@@ -508,6 +517,7 @@ async function listCheckoutFileChanges(
         isNew: true,
         isDeleted: false,
         isUntracked: true,
+        ...(refs.changeSource ? { changeSource: refs.changeSource } : {}),
       });
     }
   }
@@ -534,6 +544,18 @@ async function readGitFileContentAtRef(
 ): Promise<string | null> {
   try {
     const { stdout } = await runGitCommand(["show", `${ref}:${path}`], {
+      cwd,
+      envOverlay: READ_ONLY_GIT_ENV,
+    });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+async function readGitFileContentAtIndex(cwd: string, path: string): Promise<string | null> {
+  try {
+    const { stdout } = await runGitCommand(["show", `:${path}`], {
       cwd,
       envOverlay: READ_ONLY_GIT_ENV,
     });
@@ -583,7 +605,7 @@ const EMPTY_TREE_OBJECT_ID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 function isUnbornHeadDiffError(error: unknown): boolean {
   return (
     error instanceof Error &&
-    error.message.includes("--name-status HEAD") &&
+    error.message.includes("--name-status") &&
     error.message.includes("ambiguous argument 'HEAD'")
   );
 }
@@ -764,6 +786,7 @@ export interface CheckoutDiffCompare {
   baseRef?: string;
   ignoreWhitespace?: boolean;
   includeStructured?: boolean;
+  includeChangeSources?: boolean;
 }
 
 export interface MergeToBaseOptions {
@@ -1817,6 +1840,7 @@ function buildPlaceholderParsedDiffFile(
 ): ParsedDiffFile {
   return {
     path: change.path,
+    ...(change.changeSource ? { changeSource: change.changeSource } : {}),
     isNew: change.isNew,
     isDeleted: change.isDeleted,
     additions: options.stat?.additions ?? 0,
@@ -2175,7 +2199,11 @@ async function appendStructuredTrackedDiffs(
       ? await parseAndHighlightDiff(trackedDiffText, cwd, {
           getOldFileContent: async (file) => {
             const change = trackedChangeByPath.get(file.path);
-            if (!change || change.isNew) {
+            if (!change || change.isNew || !refsForDiff.baseRef) {
+              if (change && !change.isNew && refsForDiff.changeSource === "unstaged") {
+                const refPath = change.oldPath ?? change.path;
+                return readGitFileContentAtIndex(cwd, refPath);
+              }
               return null;
             }
             const refPath = change.oldPath ?? change.path;
@@ -2210,6 +2238,7 @@ async function appendStructuredTrackedDiffs(
       structured.push({
         ...parsedFile,
         path: change.path,
+        ...(change.changeSource ? { changeSource: change.changeSource } : {}),
         isNew: change.isNew,
         isDeleted: change.isDeleted,
         status: "ok",
@@ -2230,6 +2259,7 @@ async function appendStructuredTrackedDiffs(
 
     structured.push({
       path: change.path,
+      ...(change.changeSource ? { changeSource: change.changeSource } : {}),
       isNew: change.isNew,
       isDeleted: change.isDeleted,
       additions: stat?.additions ?? 0,
@@ -2292,6 +2322,7 @@ async function processUntrackedChange(input: ProcessUntrackedChangeInput): Promi
   structured.push({
     ...parsedFile,
     path: change.path,
+    ...(change.changeSource ? { changeSource: change.changeSource } : {}),
     isNew: change.isNew,
     isDeleted: change.isDeleted,
     status: "ok",
@@ -2388,9 +2419,30 @@ async function resolveCheckoutDiffRefs(
   cwd: string,
   compare: CheckoutDiffCompare,
   context: CheckoutContext | undefined,
-): Promise<CheckoutDiffRefs | null> {
+): Promise<CheckoutDiffRefs[] | null> {
   if (compare.mode === "uncommitted") {
-    return { baseRef: "HEAD", includeUntracked: true };
+    if (compare.includeChangeSources === true) {
+      return [
+        {
+          diffArgs: ["--cached", "HEAD"],
+          baseRef: "HEAD",
+          includeUntracked: false,
+          changeSource: "staged",
+        },
+        {
+          diffArgs: [],
+          includeUntracked: true,
+          changeSource: "unstaged",
+        },
+      ];
+    }
+    return [
+      {
+        diffArgs: ["HEAD"],
+        baseRef: "HEAD",
+        includeUntracked: true,
+      },
+    ];
   }
   const { storedBaseRef, resolvedBaseRef } = await resolveBaseRefForCwd(cwd, context);
   const baseRef = compare.baseRef ?? resolvedBaseRef;
@@ -2401,10 +2453,22 @@ async function resolveCheckoutDiffRefs(
     throw new Error(`Base ref mismatch: expected ${baseRef}, got ${compare.baseRef}`);
   }
   const bestBaseRef = await resolveBestComparisonBaseRef(cwd, baseRef);
+  const comparisonBaseRef = (await tryResolveMergeBase(cwd, bestBaseRef)) ?? bestBaseRef;
+  return [
+    {
+      diffArgs: [comparisonBaseRef, "HEAD"],
+      baseRef: comparisonBaseRef,
+      targetRef: "HEAD",
+      includeUntracked: false,
+    },
+  ];
+}
+
+function withEmptyTreeBaseForUnbornHead(refs: CheckoutDiffRefs): CheckoutDiffRefs {
   return {
-    baseRef: (await tryResolveMergeBase(cwd, bestBaseRef)) ?? bestBaseRef,
-    targetRef: "HEAD",
-    includeUntracked: false,
+    ...refs,
+    baseRef: EMPTY_TREE_OBJECT_ID,
+    diffArgs: refs.diffArgs.map((arg) => (arg === "HEAD" ? EMPTY_TREE_OBJECT_ID : arg)),
   };
 }
 
@@ -2415,28 +2479,12 @@ export async function getCheckoutDiff(
 ): Promise<CheckoutDiffResult> {
   await requireGitRepo(cwd);
 
-  const refsForDiff = await resolveCheckoutDiffRefs(cwd, compare, context);
-  if (!refsForDiff) {
+  const diffRefs = await resolveCheckoutDiffRefs(cwd, compare, context);
+  if (!diffRefs) {
     return { diff: "" };
   }
 
   const ignoreWhitespace = compare.ignoreWhitespace === true;
-  let effectiveRefsForDiff = refsForDiff;
-  let changes: CheckoutFileChange[];
-  try {
-    changes = await listCheckoutFileChanges(cwd, effectiveRefsForDiff, ignoreWhitespace);
-  } catch (error) {
-    if (!isUnbornHeadDiffError(error)) {
-      throw error;
-    }
-    effectiveRefsForDiff = { ...refsForDiff, baseRef: EMPTY_TREE_OBJECT_ID };
-    changes = await listCheckoutFileChanges(cwd, effectiveRefsForDiff, ignoreWhitespace);
-  }
-  changes.sort((a, b) => {
-    if (a.path === b.path) return 0;
-    return a.path < b.path ? -1 : 1;
-  });
-
   const structured: ParsedDiffFile[] = [];
   let diffText = "";
   let diffBytes = 0;
@@ -2456,16 +2504,6 @@ export async function getCheckoutDiff(
     }
   };
 
-  const trackedChanges = changes.filter((change) => !change.isUntracked);
-  const untrackedChanges = changes.filter((change) => change.isUntracked === true);
-  const trackedDiff = await processTrackedChanges({
-    cwd,
-    refsForDiff: effectiveRefsForDiff,
-    trackedChanges,
-    ignoreWhitespace,
-    appendDiff,
-  });
-
   const appendTrackedPlaceholderComment = (
     change: CheckoutFileChange,
     status: "binary" | "too_large",
@@ -2477,41 +2515,69 @@ export async function getCheckoutDiff(
     appendDiff(`# ${change.path}: diff too large omitted\n`);
   };
 
-  if (compare.includeStructured) {
-    await appendStructuredTrackedDiffs({
-      cwd,
-      trackedChanges,
-      trackedChangeByPath: trackedDiff.trackedChangeByPath,
-      trackedNumstatByPath: trackedDiff.trackedNumstatByPath,
-      trackedPlaceholderByPath: trackedDiff.trackedPlaceholderByPath,
-      trackedDiffText: trackedDiff.trackedDiffText,
-      refsForDiff: effectiveRefsForDiff,
-      ignoreWhitespace,
-      structured,
-      appendDiff,
-      appendTrackedPlaceholderComment,
+  for (const refsForDiff of diffRefs) {
+    let effectiveRefsForDiff = refsForDiff;
+    let changes: CheckoutFileChange[];
+    try {
+      changes = await listCheckoutFileChanges(cwd, effectiveRefsForDiff, ignoreWhitespace);
+    } catch (error) {
+      if (!isUnbornHeadDiffError(error)) {
+        throw error;
+      }
+      effectiveRefsForDiff = withEmptyTreeBaseForUnbornHead(refsForDiff);
+      changes = await listCheckoutFileChanges(cwd, effectiveRefsForDiff, ignoreWhitespace);
+    }
+    changes.sort((a, b) => {
+      if (a.path === b.path) return 0;
+      return a.path < b.path ? -1 : 1;
     });
-  } else {
-    for (const change of trackedChanges) {
-      const placeholder = trackedDiff.trackedPlaceholderByPath.get(change.path);
-      if (placeholder) {
-        appendTrackedPlaceholderComment(change, placeholder.status);
+
+    const trackedChanges = changes.filter((change) => !change.isUntracked);
+    const untrackedChanges = changes.filter((change) => change.isUntracked === true);
+    const trackedDiff = await processTrackedChanges({
+      cwd,
+      refsForDiff: effectiveRefsForDiff,
+      trackedChanges,
+      ignoreWhitespace,
+      appendDiff,
+    });
+
+    if (compare.includeStructured) {
+      await appendStructuredTrackedDiffs({
+        cwd,
+        trackedChanges,
+        trackedChangeByPath: trackedDiff.trackedChangeByPath,
+        trackedNumstatByPath: trackedDiff.trackedNumstatByPath,
+        trackedPlaceholderByPath: trackedDiff.trackedPlaceholderByPath,
+        trackedDiffText: trackedDiff.trackedDiffText,
+        refsForDiff: effectiveRefsForDiff,
+        ignoreWhitespace,
+        structured,
+        appendDiff,
+        appendTrackedPlaceholderComment,
+      });
+    } else {
+      for (const change of trackedChanges) {
+        const placeholder = trackedDiff.trackedPlaceholderByPath.get(change.path);
+        if (placeholder) {
+          appendTrackedPlaceholderComment(change, placeholder.status);
+        }
       }
     }
-  }
 
-  for (const change of untrackedChanges) {
-    if (diffBytes >= TOTAL_DIFF_MAX_BYTES) {
-      break;
+    for (const change of untrackedChanges) {
+      if (diffBytes >= TOTAL_DIFF_MAX_BYTES) {
+        break;
+      }
+      await processUntrackedChange({
+        cwd,
+        change,
+        ignoreWhitespace,
+        includeStructured: compare.includeStructured === true,
+        structured,
+        appendDiff,
+      });
     }
-    await processUntrackedChange({
-      cwd,
-      change,
-      ignoreWhitespace,
-      includeStructured: compare.includeStructured === true,
-      structured,
-      appendDiff,
-    });
   }
 
   if (compare.includeStructured) {
@@ -2529,6 +2595,29 @@ export async function commitChanges(
     await runGitCommand(["add", "-A"], { cwd, timeout: 120_000 });
   }
   await runGitCommand(["-c", "commit.gpgsign=false", "commit", "-m", options.message], {
+    cwd,
+    timeout: 120_000,
+  });
+}
+
+function requireNonEmptyGitPath(path: string): string {
+  if (!path) {
+    throw new Error("Git path is required");
+  }
+  return path;
+}
+
+export async function stageFile(cwd: string, path: string): Promise<void> {
+  await requireGitRepo(cwd);
+  await runGitCommand(["add", "-A", "--", requireNonEmptyGitPath(path)], {
+    cwd,
+    timeout: 120_000,
+  });
+}
+
+export async function unstageFile(cwd: string, path: string): Promise<void> {
+  await requireGitRepo(cwd);
+  await runGitCommand(["restore", "--staged", "--", requireNonEmptyGitPath(path)], {
     cwd,
     timeout: 120_000,
   });

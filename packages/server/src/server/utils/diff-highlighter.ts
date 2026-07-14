@@ -18,6 +18,7 @@ export interface DiffHunk {
 
 export interface ParsedDiffFile {
   path: string;
+  changeSource?: "staged" | "unstaged";
   isNew: boolean;
   isDeleted: boolean;
   additions: number;

@@ -121,6 +121,51 @@ describe("CheckoutDiffManager", () => {
     );
   });
 
+  test("keeps legacy and change-source diff subscriptions in separate targets", async () => {
+    const { manager, workspaceGitService, mockRequestWorkingTreeWatch } = createManager({
+      repoRoot: "/tmp/repo",
+    });
+
+    await manager.subscribe(
+      {
+        cwd: "/tmp/repo/packages/server",
+        compare: { mode: "uncommitted" },
+      },
+      () => {},
+    );
+    await manager.subscribe(
+      {
+        cwd: "/tmp/repo/packages/server",
+        compare: { mode: "uncommitted", includeChangeSources: true },
+      },
+      () => {},
+    );
+
+    expect(mockRequestWorkingTreeWatch).toHaveBeenCalledTimes(2);
+    expect(workspaceGitService.getCheckoutDiff).toHaveBeenNthCalledWith(
+      1,
+      "/tmp/repo",
+      expect.objectContaining({
+        mode: "uncommitted",
+        includeStructured: true,
+      }),
+      undefined,
+    );
+    expect(workspaceGitService.getCheckoutDiff.mock.calls[0][1]).not.toHaveProperty(
+      "includeChangeSources",
+    );
+    expect(workspaceGitService.getCheckoutDiff).toHaveBeenNthCalledWith(
+      2,
+      "/tmp/repo",
+      expect.objectContaining({
+        mode: "uncommitted",
+        includeStructured: true,
+        includeChangeSources: true,
+      }),
+      undefined,
+    );
+  });
+
   test("diff refresh is triggered when the working tree watch callback fires", async () => {
     const getCheckoutDiff = vi
       .fn()

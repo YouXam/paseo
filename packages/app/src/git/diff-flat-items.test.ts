@@ -2,12 +2,28 @@ import { describe, expect, it } from "vitest";
 import { buildDiffFlatItems, sumHeightsBefore, type DiffFlatItem } from "./diff-flat-items";
 import type { ParsedDiffFile } from "@/git/use-diff-query";
 
-function createFile(path: string, additions = 1, deletions = 0): ParsedDiffFile {
-  return { path, isNew: false, isDeleted: false, additions, deletions, hunks: [] };
+function createFile(
+  path: string,
+  additions = 1,
+  deletions = 0,
+  changeSource?: ParsedDiffFile["changeSource"],
+): ParsedDiffFile {
+  return {
+    path,
+    ...(changeSource ? { changeSource } : {}),
+    isNew: false,
+    isDeleted: false,
+    additions,
+    deletions,
+    hunks: [],
+  };
 }
 
 function summarize(items: DiffFlatItem[]): string[] {
   return items.map((item) => {
+    if (item.type === "changeGroup") {
+      return `[${item.source}]`;
+    }
     if (item.type === "folder") {
       return `${"  ".repeat(item.depth)}[${item.displayName}]${item.collapsed ? " (collapsed)" : ""}`;
     }
@@ -109,6 +125,23 @@ describe("buildDiffFlatItems", () => {
     // Tree order is b.ts (fileIndex 1) then a.ts (fileIndex 0)
     const headers = items.filter((i) => i.type === "header");
     expect(headers.map((h) => (h.type === "header" ? h.fileIndex : -1))).toEqual([1, 0]);
+  });
+
+  it("keeps staged and unstaged entries for the same path distinct", () => {
+    const { items, stickyHeaderIndices } = buildDiffFlatItems({
+      files: [
+        createFile("src/app/a.ts", 1, 0, "staged"),
+        createFile("src/app/a.ts", 2, 0, "unstaged"),
+      ],
+      viewMode: "flat",
+      collapsedFolders: new Set(),
+      expandedPaths: new Set(["staged:src/app/a.ts"]),
+    });
+
+    expect(summarize(items)).toEqual(["[staged]", "a.ts", "body:a.ts", "[unstaged]", "a.ts"]);
+    expect(stickyHeaderIndices).toEqual([1]);
+    const headers = items.filter((item) => item.type === "header");
+    expect(headers.map((item) => (item.type === "header" ? item.fileIndex : -1))).toEqual([0, 1]);
   });
 });
 

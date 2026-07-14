@@ -6,7 +6,9 @@ import { toCheckoutError } from "./checkout-git-utils.js";
 
 const CHECKOUT_DIFF_WATCH_DEBOUNCE_MS = 150;
 
-export type CheckoutDiffCompareInput = SubscribeCheckoutDiffRequest["compare"];
+export type CheckoutDiffCompareInput = SubscribeCheckoutDiffRequest["compare"] & {
+  includeChangeSources?: boolean;
+};
 
 export type CheckoutDiffSnapshotPayload = Omit<
   Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>["payload"],
@@ -108,7 +110,11 @@ export class CheckoutDiffManager {
   private normalizeCompare(compare: CheckoutDiffCompareInput): CheckoutDiffCompareInput {
     const ignoreWhitespace = compare.ignoreWhitespace === true;
     if (compare.mode === "uncommitted") {
-      return { mode: "uncommitted", ignoreWhitespace };
+      return {
+        mode: "uncommitted",
+        ignoreWhitespace,
+        ...(compare.includeChangeSources === true ? { includeChangeSources: true } : {}),
+      };
     }
     const trimmedBaseRef = compare.baseRef?.trim();
     return trimmedBaseRef
@@ -122,6 +128,7 @@ export class CheckoutDiffManager {
       compare.mode,
       compare.mode === "base" ? (compare.baseRef ?? "") : "",
       compare.ignoreWhitespace === true,
+      compare.includeChangeSources === true,
     ]);
   }
 
@@ -175,6 +182,7 @@ export class CheckoutDiffManager {
           baseRef: compare.baseRef,
           ignoreWhitespace: compare.ignoreWhitespace,
           includeStructured: true,
+          ...(compare.includeChangeSources === true ? { includeChangeSources: true } : {}),
         },
         options?.force
           ? { force: true, reason: options.reason ?? "checkout-diff-refresh" }

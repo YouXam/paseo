@@ -1565,6 +1565,20 @@ export const CheckoutPushRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const CheckoutStageFileRequestSchema = z.object({
+  type: z.literal("checkout.stage_file.request"),
+  cwd: z.string(),
+  path: z.string(),
+  requestId: z.string(),
+});
+
+export const CheckoutUnstageFileRequestSchema = z.object({
+  type: z.literal("checkout.unstage_file.request"),
+  cwd: z.string(),
+  path: z.string(),
+  requestId: z.string(),
+});
+
 export const CheckoutRefreshRequestSchema = z.object({
   type: z.literal("checkout.refresh.request"),
   cwd: z.string(),
@@ -1871,8 +1885,11 @@ const DiffHunkSchema = z.object({
   lines: z.array(DiffLineSchema),
 });
 
+const DiffChangeSourceSchema = z.enum(["staged", "unstaged"]);
+
 const ParsedDiffFileSchema = z.object({
   path: z.string(),
+  changeSource: DiffChangeSourceSchema.optional(),
   isNew: z.boolean(),
   isDeleted: z.boolean(),
   additions: z.number(),
@@ -2166,6 +2183,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutMergeFromBaseRequestSchema,
   CheckoutPullRequestSchema,
   CheckoutPushRequestSchema,
+  CheckoutStageFileRequestSchema,
+  CheckoutUnstageFileRequestSchema,
   CheckoutRefreshRequestSchema,
   CheckoutPrCreateRequestSchema,
   CheckoutPrMergeRequestSchema,
@@ -2435,6 +2454,8 @@ export const ServerInfoStatusPayloadSchema = z
         workspacePinning: z.boolean().optional(),
         // COMPAT(workspaceGithubClone): added in v0.1.108, remove gate after 2027-01-13.
         workspaceGithubClone: z.boolean().optional(),
+        // COMPAT(checkoutFileStageActions): added in v0.1.108, remove gate after 2027-01-13.
+        checkoutFileStageActions: z.boolean().optional(),
       })
       .optional(),
   })
@@ -3603,6 +3624,28 @@ export const CheckoutPushResponseSchema = z.object({
   }),
 });
 
+export const CheckoutStageFileResponseSchema = z.object({
+  type: z.literal("checkout.stage_file.response"),
+  payload: z.object({
+    cwd: z.string(),
+    path: z.string(),
+    success: z.boolean(),
+    error: CheckoutErrorSchema.nullable(),
+    requestId: z.string(),
+  }),
+});
+
+export const CheckoutUnstageFileResponseSchema = z.object({
+  type: z.literal("checkout.unstage_file.response"),
+  payload: z.object({
+    cwd: z.string(),
+    path: z.string(),
+    success: z.boolean(),
+    error: CheckoutErrorSchema.nullable(),
+    requestId: z.string(),
+  }),
+});
+
 export const CheckoutRefreshResponseSchema = z.object({
   type: z.literal("checkout.refresh.response"),
   payload: z.object({
@@ -4414,6 +4457,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CheckoutMergeFromBaseResponseSchema,
   CheckoutPullResponseSchema,
   CheckoutPushResponseSchema,
+  CheckoutStageFileResponseSchema,
+  CheckoutUnstageFileResponseSchema,
   CheckoutRefreshResponseSchema,
   CheckoutPrCreateResponseSchema,
   CheckoutPrMergeResponseSchema,
@@ -4714,6 +4759,10 @@ export type CheckoutPullRequest = z.infer<typeof CheckoutPullRequestSchema>;
 export type CheckoutPullResponse = z.infer<typeof CheckoutPullResponseSchema>;
 export type CheckoutPushRequest = z.infer<typeof CheckoutPushRequestSchema>;
 export type CheckoutPushResponse = z.infer<typeof CheckoutPushResponseSchema>;
+export type CheckoutStageFileRequest = z.infer<typeof CheckoutStageFileRequestSchema>;
+export type CheckoutStageFileResponse = z.infer<typeof CheckoutStageFileResponseSchema>;
+export type CheckoutUnstageFileRequest = z.infer<typeof CheckoutUnstageFileRequestSchema>;
+export type CheckoutUnstageFileResponse = z.infer<typeof CheckoutUnstageFileResponseSchema>;
 export type CheckoutRefreshRequest = z.infer<typeof CheckoutRefreshRequestSchema>;
 export type CheckoutRefreshResponse = z.infer<typeof CheckoutRefreshResponseSchema>;
 export type CheckoutPrCreateRequest = z.infer<typeof CheckoutPrCreateRequestSchema>;
@@ -4854,6 +4903,7 @@ export const WSHelloMessageSchema = z.object({
       [CLIENT_CAPS.customModeIcons]: z.boolean().optional(),
       [CLIENT_CAPS.terminalReflowableSnapshot]: z.boolean().optional(),
       [CLIENT_CAPS.providerSubagents]: z.boolean().optional(),
+      [CLIENT_CAPS.checkoutDiffChangeSources]: z.boolean().optional(),
       [CLIENT_CAPS.browserHost]: BrowserAutomationHostCapabilitySchema.optional(),
     })
     .passthrough()
