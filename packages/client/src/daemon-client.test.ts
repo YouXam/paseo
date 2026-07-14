@@ -554,6 +554,7 @@ test("advertises client capabilities in hello", async () => {
     clientType: "cli",
     protocolVersion: 1,
     capabilities: {
+      checkout_diff_change_sources: true,
       custom_mode_icons: true,
       provider_subagents: true,
       reasoning_merge_enum: true,
