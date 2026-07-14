@@ -9,6 +9,9 @@ import {
 } from "./release-version-utils.mjs";
 
 const headingPattern = /^##\s+\[?([^\]\s]+)\]?\s*-\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$/;
+const preservedBlockPatterns = [
+  /<!-- paseo-daemon-install:start -->[\s\S]*?<!-- paseo-daemon-install:end -->/g,
+];
 
 function usageAndExit(code = 1) {
   const usage = `
@@ -151,6 +154,25 @@ function exposeGitHubContributorMentions(notes) {
   );
 }
 
+function appendPreservedReleaseBlocks(notes, existingBody) {
+  if (!existingBody) {
+    return notes;
+  }
+
+  const blocks = [];
+  for (const pattern of preservedBlockPatterns) {
+    for (const match of existingBody.matchAll(pattern)) {
+      blocks.push(match[0]);
+    }
+  }
+
+  if (blocks.length === 0) {
+    return notes;
+  }
+
+  return `${notes.trimEnd()}\n\n${blocks.join("\n\n")}\n`;
+}
+
 export function syncReleaseNotes(argv = process.argv.slice(2), deps = {}) {
   const execFileSync = deps.execFileSync ?? nodeExecFileSync;
   const args = parseArgs(argv);
@@ -192,6 +214,8 @@ export function syncReleaseNotes(argv = process.argv.slice(2), deps = {}) {
   try {
     const release = getRelease(targetTag, args.repo, execFileSync);
     if (release) {
+      notes = appendPreservedReleaseBlocks(notes, release.body);
+      writeFileSync(notesPath, notes);
       updateReleaseNotes({ releaseId: release.id, repo: args.repo, notesPath }, execFileSync);
       console.log(`Updated release notes for ${targetTag}.`);
       return;
