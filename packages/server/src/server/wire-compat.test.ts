@@ -415,12 +415,14 @@ describe("wire compatibility", () => {
       features: { workspaceGithubClone: true },
     });
 
+    // The fork keeps the workspaceGithubClone feature flag (upstream replaced it
+    // with projectGithubClone), so the payload parses with the flag intact.
     expect(parsed).toEqual({
       status: "server_info",
       serverId: "legacy-server",
       hostname: null,
       version: null,
-      features: {},
+      features: { workspaceGithubClone: true },
     });
   });
 

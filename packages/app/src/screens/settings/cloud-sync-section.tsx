@@ -151,7 +151,7 @@ export function CloudSyncSection() {
           </View>
           <ThemedCloud size={ICON_SIZE.md} uniProps={mutedIconColor} />
         </View>
-        <View style={FORM_ROW_STYLE}>
+        <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.formRow]}>
           <Field
             label={t(`${CLOUD_SYNC_BASE_KEY}.endpoint.label`)}
             hint={t(`${CLOUD_SYNC_BASE_KEY}.endpoint.hint`)}
@@ -193,8 +193,8 @@ export function CloudSyncSection() {
             </Field>
           ) : null}
         </View>
-        <View style={STATUS_ROW_STYLE}>
-          <View style={STATUS_CONTENT_STYLE}>
+        <View style={[settingsStyles.row, settingsStyles.rowBorder, styles.statusRow]}>
+          <View style={[settingsStyles.rowContent, styles.statusContent]}>
             <Text style={settingsStyles.rowTitle}>
               {t(CLOUD_SYNC_STATUS_LABEL_KEYS[state.status])}
             </Text>
@@ -297,7 +297,3 @@ const styles = StyleSheet.create((theme) => ({
     marginTop: theme.spacing[3],
   },
 }));
-
-const FORM_ROW_STYLE = [settingsStyles.row, settingsStyles.rowBorder, styles.formRow];
-const STATUS_ROW_STYLE = [settingsStyles.row, settingsStyles.rowBorder, styles.statusRow];
-const STATUS_CONTENT_STYLE = [settingsStyles.rowContent, styles.statusContent];
