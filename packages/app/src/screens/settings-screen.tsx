@@ -33,6 +33,7 @@ import {
   Plus,
   FolderGit2,
   SquareTerminal,
+  Code2,
 } from "lucide-react-native";
 import { DropdownTrigger } from "@/components/ui/dropdown-trigger";
 import { ComboboxTrigger } from "@/components/ui/combobox-trigger";
@@ -55,9 +56,13 @@ import {
 } from "@/hooks/use-settings";
 import { useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-import { orderHostsLocalFirst, type HostProfile } from "@/types/host-connection";
+import {
+  orderHostsLocalFirst,
+  resolveActiveHostServerId,
+  type HostProfile,
+} from "@/types/host-connection";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
-import { useWindowControlsPadding } from "@/utils/desktop-window";
+import { WindowChromeRegion, WindowChromeSafeArea } from "@/utils/desktop-window";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { BackHeader } from "@/components/headers/back-header";
 import { ScreenHeader } from "@/components/headers/screen-header";
@@ -66,11 +71,13 @@ import { AddHostModal } from "@/components/add-host-modal";
 import { PairLinkModal } from "@/components/pair-link-modal";
 import { KeyboardShortcutsSection } from "@/screens/settings/keyboard-shortcuts-section";
 import { CloudSyncSection } from "@/screens/settings/cloud-sync-section";
+import { EditorSection } from "@/screens/settings/editor-section";
 import { Button } from "@/components/ui/button";
 import { CommunityLinks } from "@/components/community-links";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { DesktopPermissionsSection } from "@/desktop/components/desktop-permissions-section";
+import { BrowserDataSection } from "@/desktop/components/browser-data-section";
 import { IntegrationsSection } from "@/desktop/components/integrations-section";
 import { isElectronRuntime } from "@/desktop/host";
 import { useDesktopAppUpdater } from "@/desktop/updates/use-desktop-app-updater";
@@ -98,13 +105,12 @@ import {
 } from "@/screens/settings/host-page";
 import ProjectsScreen from "@/screens/projects-screen";
 import ProjectSettingsScreen from "@/screens/project-settings-screen";
-import { useIsCompactFormFactor } from "@/constants/layout";
+import { SETTINGS_DESKTOP_SIDEBAR_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import {
   type EnableBuiltInDaemonOption,
   useEnableBuiltInDaemonOption,
 } from "@/desktop/hooks/use-enable-built-in-daemon-option";
-import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
 import {
   buildOpenProjectRoute,
   buildProjectsSettingsRoute,
@@ -136,6 +142,7 @@ interface SidebarSectionItem {
 const SIDEBAR_SECTION_ITEMS: SidebarSectionItem[] = [
   { id: "general", labelKey: "settings.sections.general", icon: Settings },
   { id: "appearance", labelKey: "settings.sections.appearance", icon: Palette },
+  { id: "editor", labelKey: "settings.sections.editor", icon: Code2 },
   { id: "shortcuts", labelKey: "settings.sections.shortcuts", icon: Keyboard, desktopOnly: true },
   {
     id: "integrations",
@@ -210,8 +217,6 @@ function selectedSidebarItemStyle({ hovered }: PressableStateCallbackType & { ho
     sidebarStyles.itemSelected,
   ];
 }
-
-const ROW_WITH_BORDER_STYLE = [settingsStyles.row, settingsStyles.rowBorder];
 
 function getSendBehaviorOptions(t: TFunction) {
   return [
@@ -362,7 +367,7 @@ function GeneralSection({
               options={sendBehaviorOptions}
             />
           </View>
-          <View style={ROW_WITH_BORDER_STYLE}>
+          <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
             <View style={settingsStyles.rowContent}>
               <Text style={settingsStyles.rowTitle}>{t("settings.general.language.label")}</Text>
               <Text style={settingsStyles.rowHint}>
@@ -391,7 +396,7 @@ function GeneralSection({
             </DropdownMenu>
           </View>
           {isDesktopApp ? (
-            <View style={ROW_WITH_BORDER_STYLE}>
+            <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
               <View style={settingsStyles.rowContent}>
                 <Text style={settingsStyles.rowTitle}>
                   {t("settings.general.serviceUrls.label")}
@@ -420,7 +425,7 @@ function GeneralSection({
               </DropdownMenu>
             </View>
           ) : null}
-          <View style={ROW_WITH_BORDER_STYLE}>
+          <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
             <View style={settingsStyles.rowContent}>
               <Text style={settingsStyles.rowTitle}>
                 {t("settings.general.terminalScrollback.label")}
@@ -708,7 +713,7 @@ function DesktopAppUpdateRow() {
 
   return (
     <>
-      <View style={ROW_WITH_BORDER_STYLE}>
+      <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
         <View style={settingsStyles.rowContent}>
           <Text style={settingsStyles.rowTitle}>{t("settings.about.releaseChannel.label")}</Text>
           <Text style={settingsStyles.rowHint}>
@@ -722,7 +727,7 @@ function DesktopAppUpdateRow() {
           options={releaseChannelOptions}
         />
       </View>
-      <View style={ROW_WITH_BORDER_STYLE}>
+      <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
         <View style={settingsStyles.rowContent}>
           <Text style={settingsStyles.rowTitle}>{t("settings.about.updates.label")}</Text>
           <Text style={settingsStyles.rowHint}>{statusText}</Text>
@@ -1001,7 +1006,6 @@ function SettingsSidebar({
   const isDesktopApp = isElectronRuntime();
   const items = SIDEBAR_SECTION_ITEMS.filter((item) => !item.desktopOnly || isDesktopApp);
   const insets = useSafeAreaInsets();
-  const padding = useWindowControlsPadding("sidebar");
   const isDesktop = layout === "desktop";
   const outerContainerStyle = useMemo(
     () => [isDesktop ? sidebarStyles.desktopContainer : sidebarStyles.mobileContainer],
@@ -1014,7 +1018,6 @@ function SettingsSidebar({
   const selectedSectionId = view.kind === "section" ? view.section : null;
   const selectedHostSection = view.kind === "host" ? view.section : null;
   const isProjectsSelected = view.kind === "projects" || view.kind === "project";
-  const paddingTopStyle = useMemo(() => ({ height: padding.top }), [padding.top]);
 
   const sidebarBody = (
     <>
@@ -1091,12 +1094,17 @@ function SettingsSidebar({
   );
 
   return (
-    <View style={outerContainerStyle} testID="settings-sidebar">
+    <View
+      accessibilityLabel={t("settings.title")}
+      role="navigation"
+      style={outerContainerStyle}
+      testID="settings-sidebar"
+    >
       {isDesktop ? (
         <View style={innerContainerStyle}>
           <View style={sidebarStyles.sidebarDragArea}>
             <TitlebarDragRegion />
-            {padding.top > 0 ? <View style={paddingTopStyle} /> : null}
+            <WindowChromeSafeArea placement="below" />
             <SidebarHeaderRow
               icon={ArrowLeft}
               label={t("settings.backToWorkspace")}
@@ -1142,26 +1150,12 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
   const isCompactLayout = useIsCompactFormFactor();
   const insets = useSafeAreaInsets();
   const insetBottomStyle = useMemo(() => ({ paddingBottom: insets.bottom }), [insets.bottom]);
-  const webScrollbarStyle = useWebScrollbarStyle();
-  const scrollViewStyle = useMemo(
-    () => [styles.scrollView, webScrollbarStyle],
-    [webScrollbarStyle],
-  );
   const hosts = useHosts();
   const localServerId = useLocalDaemonServerId();
   const sortedHosts = useSortedHosts(hosts, localServerId);
   const [selectedSettingsHostServerId, setSelectedSettingsHostServerId] = useState<string | null>(
     view.kind === "host" ? view.serverId : null,
   );
-  const knownSelectedSettingsHostServerId = useMemo(() => {
-    if (!selectedSettingsHostServerId) {
-      return null;
-    }
-    return hosts.some((host) => host.serverId === selectedSettingsHostServerId)
-      ? selectedSettingsHostServerId
-      : null;
-  }, [hosts, selectedSettingsHostServerId]);
-
   useEffect(() => {
     if (view.kind === "host") {
       setSelectedSettingsHostServerId(view.serverId);
@@ -1169,11 +1163,16 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
   }, [view]);
 
   // The host the four sections scope to: the host on the active view, otherwise
-  // the picker choice, otherwise the local daemon, otherwise the first host.
+  // the picker choice, otherwise the connected local daemon, otherwise the first host.
   const activeHostServerId = useMemo(() => {
     if (view.kind === "host") return view.serverId;
-    return knownSelectedSettingsHostServerId ?? localServerId ?? sortedHosts[0]?.serverId ?? null;
-  }, [view, knownSelectedSettingsHostServerId, localServerId, sortedHosts]);
+    return resolveActiveHostServerId({
+      selectedServerId: selectedSettingsHostServerId,
+      localServerId,
+      hosts,
+      orderedHosts: sortedHosts,
+    });
+  }, [view, selectedSettingsHostServerId, localServerId, hosts, sortedHosts]);
 
   const handleSendBehaviorChange = useCallback(
     (behavior: SendBehavior) => {
@@ -1401,17 +1400,22 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
       switch (view.section) {
         case "general":
           return (
-            <GeneralSection
-              settings={settings}
-              isDesktopApp={isDesktopApp}
-              handleSendBehaviorChange={handleSendBehaviorChange}
-              handleServiceUrlBehaviorChange={handleServiceUrlBehaviorChange}
-              handleLanguageChange={handleLanguageChange}
-              handleTerminalScrollbackLinesChange={handleTerminalScrollbackLinesChange}
-            />
+            <>
+              <GeneralSection
+                settings={settings}
+                isDesktopApp={isDesktopApp}
+                handleSendBehaviorChange={handleSendBehaviorChange}
+                handleServiceUrlBehaviorChange={handleServiceUrlBehaviorChange}
+                handleLanguageChange={handleLanguageChange}
+                handleTerminalScrollbackLinesChange={handleTerminalScrollbackLinesChange}
+              />
+              {isDesktopApp ? <BrowserDataSection /> : null}
+            </>
           );
         case "appearance":
           return <AppearanceSection />;
+        case "editor":
+          return <EditorSection />;
         case "shortcuts":
           return isDesktopApp ? <KeyboardShortcutsSection /> : null;
         case "integrations":
@@ -1448,6 +1452,16 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
     );
   }
 
+  const desktopDetailHeaderLeft = detailHeader ? (
+    <>
+      <HeaderIconBadge>
+        <detailHeader.Icon size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
+      </HeaderIconBadge>
+      <ScreenTitle testID="settings-detail-header-title">{detailHeader.title}</ScreenTitle>
+      {detailHeader.titleAccessory}
+    </>
+  ) : null;
+
   const addHostModals = (
     <>
       <AddHostMethodModal
@@ -1477,7 +1491,7 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
     return (
       <View style={styles.container}>
         <BackHeader title={t("settings.title")} onBack={handleBackToWorkspace} />
-        <ScrollView style={scrollViewStyle} contentContainerStyle={insetBottomStyle}>
+        <ScrollView style={styles.scrollView} contentContainerStyle={insetBottomStyle}>
           <SettingsSidebar
             view={view}
             onSelectSection={handleSelectSection}
@@ -1508,7 +1522,7 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
           titleAccessory={detailHeader?.titleAccessory}
           onBack={detailBackHandler}
         />
-        <ScrollView style={scrollViewStyle} contentContainerStyle={insetBottomStyle}>
+        <ScrollView style={styles.scrollView} contentContainerStyle={insetBottomStyle}>
           <View style={styles.content}>{content}</View>
         </ScrollView>
         {addHostModals}
@@ -1522,43 +1536,31 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
   return (
     <View style={styles.container}>
       <View style={desktopStyles.row}>
-        <SettingsSidebar
-          view={view}
-          onSelectSection={handleSelectSection}
-          onSelectHostSection={handleSelectHostSection}
-          onSelectHost={handleSelectHost}
-          onSelectProjects={handleSelectProjects}
-          onAddHost={handleAddHost}
-          onBackToWorkspace={handleBackToWorkspace}
-          activeHostServerId={activeHostServerId}
-          layout="desktop"
-        />
-        <View style={desktopStyles.contentPane}>
-          <ScreenHeader
-            borderless={!detailHeader}
-            windowControlsPaddingRole="detailHeader"
-            left={
-              detailHeader ? (
-                <>
-                  <HeaderIconBadge>
-                    <detailHeader.Icon
-                      size={theme.iconSize.md}
-                      color={theme.colors.foregroundMuted}
-                    />
-                  </HeaderIconBadge>
-                  <ScreenTitle testID="settings-detail-header-title">
-                    {detailHeader.title}
-                  </ScreenTitle>
-                  {detailHeader.titleAccessory}
-                </>
-              ) : null
-            }
-            leftStyle={desktopStyles.detailLeft}
+        <WindowChromeRegion corners="top-left">
+          <SettingsSidebar
+            view={view}
+            onSelectSection={handleSelectSection}
+            onSelectHostSection={handleSelectHostSection}
+            onSelectHost={handleSelectHost}
+            onSelectProjects={handleSelectProjects}
+            onAddHost={handleAddHost}
+            onBackToWorkspace={handleBackToWorkspace}
+            activeHostServerId={activeHostServerId}
+            layout="desktop"
           />
-          <ScrollView style={scrollViewStyle} contentContainerStyle={insetBottomStyle}>
-            <View style={styles.content}>{content}</View>
-          </ScrollView>
-        </View>
+        </WindowChromeRegion>
+        <WindowChromeRegion corners="top-right">
+          <View style={desktopStyles.contentPane} testID="settings-detail-pane">
+            <ScreenHeader
+              borderless={!detailHeader}
+              left={desktopDetailHeaderLeft}
+              leftStyle={desktopStyles.detailLeft}
+            />
+            <ScrollView style={styles.scrollView} contentContainerStyle={insetBottomStyle}>
+              <View style={styles.content}>{content}</View>
+            </ScrollView>
+          </View>
+        </WindowChromeRegion>
       </View>
       {addHostModals}
     </View>
@@ -1668,7 +1670,7 @@ const desktopStyles = StyleSheet.create((theme) => ({
 
 const sidebarStyles = StyleSheet.create((theme) => ({
   desktopContainer: {
-    width: 320,
+    width: SETTINGS_DESKTOP_SIDEBAR_WIDTH,
     borderRightWidth: 1,
     borderRightColor: theme.colors.border,
     backgroundColor: theme.colors.surfaceSidebar,

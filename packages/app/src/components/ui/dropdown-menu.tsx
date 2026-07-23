@@ -11,6 +11,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import {
   ActivityIndicator,
@@ -31,9 +32,9 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { Check, CheckCircle } from "lucide-react-native";
 import { FloatingScrollView, FloatingSurface } from "@/components/ui/floating";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
 import { isWeb } from "@/constants/platform";
 import { useDismissKeyboardOnOpen } from "@/components/ui/keyboard-dismiss";
+import { getOverlayRoot, OVERLAY_Z } from "@/lib/overlay-root";
 
 // Action status for menu items with loading/success feedback
 export type ActionStatus = "idle" | "pending" | "success";
@@ -217,12 +218,16 @@ function renderDropdownSurface(input: {
       style={surfaceStyle}
       frameStyle={frameStyle}
       entering={contentEntering}
-      exiting={contentExiting.withCallback((finished) => {
-        "worklet";
-        if (finished) {
-          runOnJS(onExited)();
-        }
-      })}
+      exiting={
+        isWeb
+          ? undefined
+          : contentExiting.withCallback((finished) => {
+              "worklet";
+              if (finished) {
+                runOnJS(onExited)();
+              }
+            })
+      }
     >
       {body}
     </FloatingSurface>
@@ -448,7 +453,6 @@ export function DropdownMenuContent({
     useDropdownMenuContext("DropdownMenuContent");
   const [modalVisible, setModalVisible] = useState(false);
   const surfaceNativeID = useId();
-  const webScrollbarStyle = useWebScrollbarStyle();
   const [closing, setClosing] = useState(false);
   const [triggerRect, setTriggerRect] = useState<Rect | null>(null);
   const [contentSize, setContentSize] = useState<Size | null>(null);
@@ -497,6 +501,17 @@ export function DropdownMenuContent({
   const handleClose = useCallback(() => {
     setOpen(false);
   }, [setOpen]);
+
+  useEffect(() => {
+    if (!isWeb || !modalVisible || typeof window === "undefined") return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      handleClose();
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [handleClose, modalVisible]);
 
   // Measure trigger when opening
   useEffect(() => {
@@ -603,8 +618,8 @@ export function DropdownMenuContent({
     align,
   ]);
   const scrollViewportStyle = useMemo(
-    () => [webScrollbarStyle, visibleContentSize ? { height: visibleContentSize.height } : null],
-    [visibleContentSize, webScrollbarStyle],
+    () => [visibleContentSize ? { height: visibleContentSize.height } : null],
+    [visibleContentSize],
   );
 
   if (!modalVisible) return null;
@@ -615,6 +630,34 @@ export function DropdownMenuContent({
     </View>
   );
 
+  const overlay = (
+    <View style={[styles.overlay, isWeb ? styles.overlayWeb : null]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={t("menu.backdrop")}
+        style={styles.backdrop}
+        onPress={handleClose}
+        testID={testID ? `${testID}-backdrop` : undefined}
+      />
+      {!closing
+        ? renderDropdownSurface({
+            frameStyle,
+            testID,
+            surfaceStyle,
+            scrollable,
+            scrollViewportStyle,
+            content,
+            surfaceNativeID,
+            onExited: () => setModalVisible(false),
+          })
+        : null}
+    </View>
+  );
+
+  if (isWeb && typeof document !== "undefined") {
+    return createPortal(overlay, getOverlayRoot());
+  }
+
   return (
     <Modal
       visible={modalVisible}
@@ -624,27 +667,7 @@ export function DropdownMenuContent({
       onDismiss={flushPendingSelect}
       onRequestClose={handleClose}
     >
-      <View style={styles.overlay}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t("menu.backdrop")}
-          style={styles.backdrop}
-          onPress={handleClose}
-          testID={testID ? `${testID}-backdrop` : undefined}
-        />
-        {!closing
-          ? renderDropdownSurface({
-              frameStyle,
-              testID,
-              surfaceStyle,
-              scrollable,
-              scrollViewportStyle,
-              content,
-              surfaceNativeID,
-              onExited: () => setModalVisible(false),
-            })
-          : null}
-      </View>
+      {overlay}
     </Modal>
   );
 }
@@ -675,10 +698,12 @@ export function DropdownMenuSeparator({
 
 export function DropdownMenuHint({
   children,
+  style,
   testID,
-}: PropsWithChildren<{ testID?: string }>): ReactElement {
+}: PropsWithChildren<{ style?: ViewStyle | ViewStyle[]; testID?: string }>): ReactElement {
+  const hintContainerStyle = useMemo(() => [styles.hintContainer, style], [style]);
   return (
-    <View style={styles.hintContainer} testID={testID}>
+    <View style={hintContainerStyle} testID={testID}>
       <Text style={styles.hintText}>{children}</Text>
     </View>
   );
@@ -878,6 +903,11 @@ const styles = StyleSheet.create((theme) => ({
   overlay: {
     flex: 1,
   },
+  overlayWeb: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: OVERLAY_Z.modal,
+    pointerEvents: "auto" as const,
+  },
   backdrop: {
     position: "absolute",
     top: 0,
@@ -908,7 +938,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   hintContainer: {
     paddingHorizontal: theme.spacing[3],
-    paddingBottom: theme.spacing[2],
+    paddingVertical: theme.spacing[2],
   },
   hintText: {
     fontSize: theme.fontSize.xs,

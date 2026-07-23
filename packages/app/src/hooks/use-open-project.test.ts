@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  cloneGithubProjectDirectly,
   getOpenProjectFailureReason,
-  openGithubRepoDirectly,
   openProjectDirectly,
 } from "@/hooks/open-project";
 import type {
   EmptyProjectDescriptor as ProjectWithoutWorkspacesDescriptor,
   WorkspaceDescriptor,
 } from "@/stores/session-store";
-import type { NavigateToWorkspaceInput } from "@/stores/navigation-active-workspace-store";
 
 const SERVER_ID = "server-1";
 const PROJECT_PATH = "/repo/project";
@@ -20,25 +19,6 @@ function buildProjectPayload() {
     projectDisplayName: "project",
     projectRootPath: PROJECT_PATH,
     projectKind: "git" as const,
-  };
-}
-
-function buildWorkspacePayload() {
-  return {
-    id: "1",
-    projectId: "1",
-    projectDisplayName: "project",
-    projectRootPath: PROJECT_PATH,
-    workspaceDirectory: PROJECT_PATH,
-    projectKind: "git" as const,
-    workspaceKind: "checkout" as const,
-    name: "project",
-    archivingAt: null,
-    status: "done" as const,
-    statusEnteredAt: null,
-    activityAt: null,
-    diffStat: null,
-    scripts: [],
   };
 }
 
@@ -83,29 +63,18 @@ function createFakeSession() {
   };
 }
 
-function createFakeNavigator() {
-  const navigations: NavigateToWorkspaceInput[] = [];
-  return {
-    navigations,
-    navigateToWorkspace: (input: NavigateToWorkspaceInput) => {
-      navigations.push(input);
-      return `/hosts/${input.serverId}/workspaces/${input.workspaceId}`;
-    },
-  };
-}
-
-function createFakeGithubCloneClient(workspace: ReturnType<typeof buildWorkspacePayload>) {
+function createFakeGithubCloneClient(project: ReturnType<typeof buildProjectPayload> | null) {
   const clones: RecordedClone[] = [];
   return {
     clones,
-    cloneGithubWorkspace: async (input: RecordedClone) => {
+    cloneGithubProject: async (input: RecordedClone) => {
       clones.push(input);
       return {
         requestId: "request-3",
         repo: "owner/project",
         checkoutPath: PROJECT_PATH,
-        error: null,
-        workspace,
+        error: project ? null : "Project registration failed",
+        project,
       };
     },
   };
@@ -141,7 +110,7 @@ describe("openProjectDirectly", () => {
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
-    expect(result).toEqual({ ok: true, workspaceId: null });
+    expect(result).toEqual({ ok: true, workspaceId: null, project: projectPayload });
     expect(session.projects).toEqual([
       {
         serverId: SERVER_ID,
@@ -154,7 +123,6 @@ describe("openProjectDirectly", () => {
         },
       },
     ]);
-    expect(session.merges).toEqual([]);
     expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
   });
 
@@ -212,7 +180,7 @@ describe("openProjectDirectly", () => {
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
-    expect(result).toEqual({ ok: true, workspaceId: "wks_feature_a" });
+    expect(result).toEqual({ ok: true, workspaceId: "wks_feature_a", project: null });
     expect(addProjectCalled).toBe(false);
     expect(session.projects).toEqual([]);
     expect(session.merges).toEqual([
@@ -303,26 +271,24 @@ describe("openProjectDirectly", () => {
   });
 });
 
-describe("openGithubRepoDirectly", () => {
-  it("opens a cloned GitHub workspace and seeds a draft tab", async () => {
+describe("cloneGithubProjectDirectly", () => {
+  it("registers a cloned GitHub project without creating a workspace", async () => {
     const session = createFakeSession();
-    const navigator = createFakeNavigator();
-    const workspacePayload = buildWorkspacePayload();
-    const github = createFakeGithubCloneClient(workspacePayload);
+    const projectPayload = buildProjectPayload();
+    const github = createFakeGithubCloneClient(projectPayload);
 
-    const result = await openGithubRepoDirectly({
+    const result = await cloneGithubProjectDirectly({
       serverId: SERVER_ID,
       repo: "owner/project",
       targetDirectory: "~/workspace",
       cloneProtocol: "https",
       isConnected: true,
       client: github,
-      mergeWorkspaces: session.mergeWorkspaces,
+      addEmptyProject: session.addEmptyProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
-      navigateToWorkspace: navigator.navigateToWorkspace,
     });
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ ok: true, workspaceId: null, project: projectPayload });
     expect(github.clones).toEqual([
       {
         repo: "owner/project",
@@ -330,45 +296,40 @@ describe("openGithubRepoDirectly", () => {
         cloneProtocol: "https",
       },
     ]);
-    expect(session.merges).toHaveLength(1);
-    expect(session.merges[0]?.serverId).toBe(SERVER_ID);
-    expect(session.merges[0]?.workspaces[0]).toMatchObject({
-      id: "1",
-      projectId: "1",
-      projectRootPath: PROJECT_PATH,
-      workspaceDirectory: PROJECT_PATH,
-    });
-    expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
-    expect(navigator.navigations).toEqual([
+    expect(session.projects).toEqual([
       {
         serverId: SERVER_ID,
-        workspaceId: "1",
-        target: { kind: "draft", draftId: expect.any(String) },
+        project: {
+          ...projectPayload,
+          projectCustomName: null,
+        },
       },
     ]);
+    expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
   });
 
-  it("rejects a workspace without an identity before changing app state", async () => {
+  it("does not register a project when cloning fails", async () => {
     const session = createFakeSession();
-    const navigator = createFakeNavigator();
-    const github = createFakeGithubCloneClient({ ...buildWorkspacePayload(), id: " " });
+    const github = createFakeGithubCloneClient(null);
 
-    const result = await openGithubRepoDirectly({
+    const result = await cloneGithubProjectDirectly({
       serverId: SERVER_ID,
       repo: "owner/project",
       targetDirectory: "~/workspace",
       cloneProtocol: "https",
       isConnected: true,
       client: github,
-      mergeWorkspaces: session.mergeWorkspaces,
+      addEmptyProject: session.addEmptyProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
-      navigateToWorkspace: navigator.navigateToWorkspace,
     });
 
-    expect(result).toBe(false);
-    expect(session.merges).toEqual([]);
+    expect(result).toEqual({
+      ok: false,
+      errorCode: null,
+      error: "Project registration failed",
+    });
+    expect(session.projects).toEqual([]);
     expect(session.hydrated).toEqual([]);
-    expect(navigator.navigations).toEqual([]);
   });
 });
 

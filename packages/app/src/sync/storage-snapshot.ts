@@ -10,7 +10,6 @@ import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sections-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
-import { useWorkspaceTabsStore } from "@/stores/workspace-tabs-store";
 import { usePinnedTargetsStore } from "@/workspace-pins/store";
 import { useReviewDraftStore } from "@/review/store";
 
@@ -25,6 +24,8 @@ const DRAFTS_STORAGE_KEY = "paseo-drafts";
 
 export const SYNC_STORAGE_KEYS = [
   HOST_REGISTRY_STORAGE_KEY,
+  // COMPAT(workspace-tabs-state): legacy key from the pre-layout-store tabs
+  // store; kept in snapshots so older devices can still import them.
   "workspace-tabs-state",
   "workspace-layout-state",
   DRAFTS_STORAGE_KEY,
@@ -125,7 +126,6 @@ function normalizeSyncStorageSnapshot(value: unknown): SyncStorageSnapshot {
 
 async function rehydratePersistedStores(): Promise<void> {
   await Promise.all([
-    Promise.resolve(useWorkspaceTabsStore.persist.rehydrate()),
     Promise.resolve(useWorkspaceLayoutStore.persist.rehydrate()),
     Promise.resolve(useDraftStore.persist.rehydrate()),
     Promise.resolve(useSidebarOrderStore.persist.rehydrate()),

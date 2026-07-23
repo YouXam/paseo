@@ -1,4 +1,8 @@
 export const CLIENT_CAPS = {
+  // COMPAT(selectiveAgentTimeline): added in v0.1.106. Capable clients receive
+  // agent streams only for their explicit viewed set. Remove after 2027-01-12
+  // once the supported client floor is >= v0.1.106.
+  selectiveAgentTimeline: "selective_agent_timeline",
   reasoningMergeEnum: "reasoning_merge_enum",
   // COMPAT(customModeIcons): added in v0.1.84. Old clients pin AgentModeIcon to
   // a closed enum and crash rendering unknown values; daemon downgrades icons
@@ -18,6 +22,8 @@ export const CLIENT_CAPS = {
   // staged/unstaged split diff entries, including duplicate paths with different
   // changeSource values, to clients that can key and render those entries safely.
   checkoutDiffChangeSources: "checkout_diff_change_sources",
+  // COMPAT(projectUpdates): added in v0.1.109, remove gate after 2027-01-15.
+  projectUpdates: "project_updates",
   browserHost: "browser_host",
 } as const;
 
