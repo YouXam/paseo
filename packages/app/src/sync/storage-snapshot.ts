@@ -12,13 +12,9 @@ import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { usePinnedTargetsStore } from "@/workspace-pins/store";
 import { useReviewDraftStore } from "@/review/store";
+import { type SyncStorageSnapshot } from "@/sync/merge";
 
-export interface SyncStorageSnapshot {
-  version: 1;
-  deviceId: string;
-  exportedAt: number;
-  storage: Record<string, string | null>;
-}
+export type { SyncStorageSnapshot };
 
 const DRAFTS_STORAGE_KEY = "paseo-drafts";
 

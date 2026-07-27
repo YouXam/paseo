@@ -18,6 +18,7 @@ import {
   importSyncDataKey,
   type EncryptedSyncSnapshot,
 } from "@/sync/crypto";
+import { mergeSyncStorageSnapshots } from "@/sync/merge";
 import {
   applySyncStorageSnapshot,
   fingerprintSyncStorageSnapshot,
@@ -79,6 +80,7 @@ interface StoredCloudSyncSession {
 const CONFIG_STORAGE_KEY = "@paseo:cloud-sync-config";
 const SESSION_STORAGE_KEY = "@paseo:cloud-sync-session";
 const POLL_INTERVAL_MS = 4_000;
+const MAX_SYNC_MERGE_ATTEMPTS = 5;
 
 function getCurrentOrigin(): string {
   if (typeof window !== "undefined" && typeof window.location?.origin === "string") {
@@ -208,6 +210,7 @@ class CloudSyncManager {
   private pollHandle: ReturnType<typeof setInterval> | null = null;
   private websocket: WebSocket | null = null;
   private lastLocalFingerprint: string | null = null;
+  private lastSyncedSnapshot: SyncStorageSnapshot | null = null;
   private applyingRemote = false;
   private bootPromise: Promise<void> | null = null;
 
@@ -255,6 +258,7 @@ class CloudSyncManager {
   logout(): void {
     this.session = null;
     this.lastLocalFingerprint = null;
+    this.lastSyncedSnapshot = null;
     this.stopBackgroundSync();
     void this.clearStoredSession();
     this.setState({
@@ -351,6 +355,7 @@ class CloudSyncManager {
       if (!sessionImported || isInvalidStoredSessionError(error)) {
         this.session = null;
         this.lastLocalFingerprint = null;
+        this.lastSyncedSnapshot = null;
         await this.clearStoredSession();
         this.setState({
           sessionUsername: null,
@@ -428,6 +433,7 @@ class CloudSyncManager {
           dataKey: keys.dataKey,
           revision: response.revision,
         };
+        this.lastSyncedSnapshot = localSnapshot;
         this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(localSnapshot);
       } else {
         const response = await loginSyncUser({
@@ -448,9 +454,9 @@ class CloudSyncManager {
         if (response.snapshot) {
           try {
             await this.applyEncryptedSnapshot(keys.dataKey, response.snapshot);
-            this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(
-              await readSyncStorageSnapshot(deviceId),
-            );
+            const applied = await readSyncStorageSnapshot(deviceId);
+            this.lastSyncedSnapshot = applied;
+            this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(applied);
           } catch (error) {
             console.warn("[CloudSync] Remote snapshot could not be decrypted; replacing it", error);
             await this.pushLocalSnapshot(this.session, { force: true });
@@ -477,6 +483,7 @@ class CloudSyncManager {
     } catch (error) {
       this.session = null;
       this.lastLocalFingerprint = null;
+      this.lastSyncedSnapshot = null;
       await this.clearStoredSession();
       this.setState({
         status: "error",
@@ -597,61 +604,77 @@ class CloudSyncManager {
       precomputedSnapshot?: SyncStorageSnapshot;
     } = {},
   ): Promise<void> {
-    const snapshot = input.precomputedSnapshot ?? (await readSyncStorageSnapshot(session.deviceId));
-    const fingerprint = fingerprintSyncStorageSnapshot(snapshot);
-    if (!input.force && fingerprint === this.lastLocalFingerprint) {
+    const initial = input.precomputedSnapshot ?? (await readSyncStorageSnapshot(session.deviceId));
+    if (!input.force && fingerprintSyncStorageSnapshot(initial) === this.lastLocalFingerprint) {
       return;
     }
 
     this.setState({ status: "syncing", lastError: null });
     try {
-      const encrypted = await encryptSyncPayload(session.dataKey, snapshot);
-      const response = await putSyncSnapshot({
-        endpoint: session.endpoint,
-        token: session.token,
-        baseRevision: session.revision,
-        deviceId: session.deviceId,
-        snapshot: encrypted,
-      });
-      session.revision = response.revision;
-      this.lastLocalFingerprint = fingerprint;
-      const lastSyncAt = Date.now();
-      await this.saveStoredSession(session, lastSyncAt);
-      this.setState({
-        status: "synced",
-        lastError: null,
-        lastSyncAt,
-        remoteRevision: response.revision,
-      });
-    } catch (error) {
-      if (isConflictError(error)) {
-        await this.resolveConflictByPullingRemote(session, error);
-        return;
+      let snapshot = initial;
+      for (let attempt = 0; ; attempt += 1) {
+        const encrypted = await encryptSyncPayload(session.dataKey, snapshot);
+        try {
+          const response = await putSyncSnapshot({
+            endpoint: session.endpoint,
+            token: session.token,
+            baseRevision: session.revision,
+            deviceId: session.deviceId,
+            snapshot: encrypted,
+          });
+          session.revision = response.revision;
+          this.lastSyncedSnapshot = snapshot;
+          this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(snapshot);
+          const lastSyncAt = Date.now();
+          await this.saveStoredSession(session, lastSyncAt);
+          this.setState({
+            status: "synced",
+            lastError: null,
+            lastSyncAt,
+            remoteRevision: response.revision,
+          });
+          return;
+        } catch (error) {
+          if (!isConflictError(error) || attempt >= MAX_SYNC_MERGE_ATTEMPTS) {
+            throw error;
+          }
+          snapshot = await this.mergeRemoteConflict(session, error, snapshot);
+        }
       }
+    } catch (error) {
       this.setState({ status: "error", lastError: errorMessage(error) });
       throw error;
     }
   }
 
-  private async resolveConflictByPullingRemote(
+  // Resolve a revision conflict by merging the remote snapshot into the local one
+  // (adopt a key only the remote changed; otherwise keep local) and retrying the
+  // push — instead of overwriting in-flight local work with the server copy.
+  private async mergeRemoteConflict(
     session: CloudSyncSession,
     conflict: SyncConflictError,
-  ): Promise<void> {
+    local: SyncStorageSnapshot,
+  ): Promise<SyncStorageSnapshot> {
     session.revision = conflict.revision;
-    if (conflict.snapshot) {
-      await this.applyEncryptedSnapshot(session.dataKey, conflict.snapshot);
+    const remote = conflict.snapshot
+      ? await decryptSyncPayload<SyncStorageSnapshot>(session.dataKey, conflict.snapshot)
+      : null;
+    if (!remote) {
+      return local;
     }
-    this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(
-      await readSyncStorageSnapshot(session.deviceId),
-    );
-    const lastSyncAt = Date.now();
-    await this.saveStoredSession(session, lastSyncAt);
-    this.setState({
-      status: "synced",
-      lastError: null,
-      lastSyncAt,
-      remoteRevision: session.revision,
-    });
+    const merged = mergeSyncStorageSnapshots(this.lastSyncedSnapshot, local, remote);
+    await this.applyLocalSnapshot(merged);
+    this.lastSyncedSnapshot = remote;
+    return await readSyncStorageSnapshot(session.deviceId);
+  }
+
+  private async applyLocalSnapshot(snapshot: SyncStorageSnapshot): Promise<void> {
+    this.applyingRemote = true;
+    try {
+      await applySyncStorageSnapshot(snapshot);
+    } finally {
+      this.applyingRemote = false;
+    }
   }
 
   private async pullRemoteSnapshot(session: CloudSyncSession): Promise<void> {
@@ -665,9 +688,9 @@ class CloudSyncManager {
       if (response.snapshot) {
         await this.applyEncryptedSnapshot(session.dataKey, response.snapshot);
       }
-      this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(
-        await readSyncStorageSnapshot(session.deviceId),
-      );
+      const applied = await readSyncStorageSnapshot(session.deviceId);
+      this.lastSyncedSnapshot = applied;
+      this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(applied);
       const lastSyncAt = Date.now();
       await this.saveStoredSession(session, lastSyncAt);
       this.setState({
