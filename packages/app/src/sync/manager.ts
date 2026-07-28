@@ -716,9 +716,11 @@ class CloudSyncManager {
         if (fingerprintSyncStorageSnapshot(merged) !== fingerprintSyncStorageSnapshot(local)) {
           await this.applyLocalSnapshot(merged);
         }
-        // If the merge preserved unsynced local work (merged !== remote), leave the
-        // fingerprint at remote so the next background sync pushes it and converges.
-        this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(remote);
+        // Match the fingerprint to the merged local state so a keepalive never
+        // triggers a push on its own. Otherwise two sessions with divergent
+        // values for one key (e.g. per-tab drafts) ping-pong forever. Real local
+        // edits still change the fingerprint and push, converging on next edit.
+        this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(merged);
       } else {
         const applied = await readSyncStorageSnapshot(session.deviceId);
         this.lastSyncedSnapshot = applied;
