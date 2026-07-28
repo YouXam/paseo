@@ -567,7 +567,7 @@ class CloudSyncManager {
         parsed.deviceId !== session.deviceId &&
         parsed.revision > session.revision
       ) {
-        void this.pullRemoteSnapshot(session);
+        void this.reconcileFromRemote(session);
       }
     } catch {
       // Ignore non-JSON keepalive frames.
@@ -663,8 +663,15 @@ class CloudSyncManager {
       return local;
     }
     const merged = mergeSyncStorageSnapshots(this.lastSyncedSnapshot, local, remote);
-    await this.applyLocalSnapshot(merged);
     this.lastSyncedSnapshot = remote;
+    // Only touch storage / rehydrate the app when the merge brings in remote-only
+    // changes. In the common same-key conflict (local-wins) merged === local, so
+    // just re-push without resetting the UI (which reloads the host runtime and
+    // bounces the user to the welcome screen).
+    if (fingerprintSyncStorageSnapshot(merged) === fingerprintSyncStorageSnapshot(local)) {
+      return merged;
+    }
+    await this.applyLocalSnapshot(merged);
     return await readSyncStorageSnapshot(session.deviceId);
   }
 
@@ -674,6 +681,53 @@ class CloudSyncManager {
       await applySyncStorageSnapshot(snapshot);
     } finally {
       this.applyingRemote = false;
+    }
+  }
+
+  // Keepalive-driven reconcile: another device advanced the revision. Merge the
+  // remote snapshot into local (local-wins) instead of overwriting, and rehydrate
+  // only when the merge changes local state — otherwise the UI would reset (host
+  // runtime reload -> welcome screen) on every remote write.
+  private async reconcileFromRemote(session: CloudSyncSession): Promise<void> {
+    if (this.applyingRemote || this.state.status === "syncing") {
+      return;
+    }
+    this.setState({ status: "syncing", lastError: null });
+    try {
+      const response = await fetchSyncSnapshot({
+        endpoint: session.endpoint,
+        token: session.token,
+      });
+      session.revision = response.revision;
+      if (response.snapshot) {
+        const remote = await decryptSyncPayload<SyncStorageSnapshot>(
+          session.dataKey,
+          response.snapshot,
+        );
+        const local = await readSyncStorageSnapshot(session.deviceId);
+        const merged = mergeSyncStorageSnapshots(this.lastSyncedSnapshot, local, remote);
+        this.lastSyncedSnapshot = remote;
+        if (fingerprintSyncStorageSnapshot(merged) !== fingerprintSyncStorageSnapshot(local)) {
+          await this.applyLocalSnapshot(merged);
+        }
+        // If the merge preserved unsynced local work (merged !== remote), leave the
+        // fingerprint at remote so the next background sync pushes it and converges.
+        this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(remote);
+      } else {
+        const applied = await readSyncStorageSnapshot(session.deviceId);
+        this.lastSyncedSnapshot = applied;
+        this.lastLocalFingerprint = fingerprintSyncStorageSnapshot(applied);
+      }
+      const lastSyncAt = Date.now();
+      await this.saveStoredSession(session, lastSyncAt);
+      this.setState({
+        status: "synced",
+        lastError: null,
+        lastSyncAt,
+        remoteRevision: session.revision,
+      });
+    } catch (error) {
+      this.setState({ status: "error", lastError: errorMessage(error) });
     }
   }
 
