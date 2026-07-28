@@ -18,7 +18,7 @@ import {
   importSyncDataKey,
   type EncryptedSyncSnapshot,
 } from "@/sync/crypto";
-import { mergeSyncStorageSnapshots } from "@/sync/merge";
+import { describeSyncStorageDivergence, mergeSyncStorageSnapshots } from "@/sync/merge";
 import {
   applySyncStorageSnapshot,
   fingerprintSyncStorageSnapshot,
@@ -662,6 +662,12 @@ class CloudSyncManager {
     if (!remote) {
       return local;
     }
+    const divergence = describeSyncStorageDivergence(this.lastSyncedSnapshot, local, remote);
+    console.info(
+      `[CloudSync] revision conflict -> ${conflict.revision}; diverging keys: ${
+        divergence.join(", ") || "none"
+      }`,
+    );
     const merged = mergeSyncStorageSnapshots(this.lastSyncedSnapshot, local, remote);
     this.lastSyncedSnapshot = remote;
     // Only touch storage / rehydrate the app when the merge brings in remote-only
