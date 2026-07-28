@@ -12,7 +12,6 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Folder, FolderPlus, GitBranch, GitPullRequest } from "lucide-react-native";
 import { Composer } from "@/composer";
 import { FileDropZone } from "@/components/file-drop/file-drop-zone";
-import { DraftAgentModeControl } from "@/composer/agent-controls/mode-control";
 import {
   resolveComposerAttachmentSubmitFormat,
   splitComposerAttachmentsForSubmit,
@@ -56,6 +55,8 @@ import {
   type PendingWorkspaceDraftSetup,
 } from "@/stores/workspace-draft-submission-store";
 import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
+import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
+import type { KeyboardActionId } from "@/keyboard/keyboard-action-dispatcher";
 import { useFormPreferences } from "@/hooks/use-form-preferences";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { getForgePresentation } from "@/git/forge";
@@ -182,6 +183,8 @@ interface PickerOptionData {
 const BRANCH_OPTION_PREFIX = "branch:";
 const PR_OPTION_PREFIX = "github-pr:";
 const PROJECT_ICON_FALLBACK_FONT_SIZE = 10;
+// Stable reference so the keyboard-action handler doesn't re-register each render.
+const PROJECT_PICK_ACTIONS: readonly KeyboardActionId[] = ["workspace.project.pick"];
 // Height of a single picker-trigger badge. The Base-row spacer reserves exactly
 // this so toggling Isolation to Local hides the row without shifting the form.
 const BADGE_HEIGHT = 28;
@@ -1382,6 +1385,7 @@ function useNewWorkspaceFormStack(input: NewWorkspaceFormStackInput): ReactEleme
         open={project.openState}
         onOpenChange={project.onOpenChange}
         desktopPlacement="bottom-start"
+        desktopMinWidth={360}
         anchorRef={project.anchorRef}
         emptyText="No projects available."
         renderOption={project.renderOption}
@@ -1402,6 +1406,7 @@ function useNewWorkspaceFormStack(input: NewWorkspaceFormStackInput): ReactEleme
         searchable={false}
         title="Host"
         desktopPlacement="bottom-start"
+        desktopMinWidth={200}
         hostOptionTestID={newWorkspaceHostOptionTestID}
       >
         <Pressable
@@ -1787,6 +1792,22 @@ export function NewWorkspaceScreen({
     setProjectPickerOpen(true);
   }, []);
 
+  // Cmd/Ctrl+P opens the project picker with its search focused so the user can
+  // switch projects from the keyboard. Registered only while this screen is
+  // mounted, so the shortcut doesn't swallow the browser's native print
+  // elsewhere; gated on having projects to pick.
+  const handleProjectPick = useCallback(() => {
+    openProjectPicker();
+    return true;
+  }, [openProjectPicker]);
+  useKeyboardActionHandler({
+    handlerId: "new-workspace-project-pick",
+    actions: PROJECT_PICK_ACTIONS,
+    enabled: projectPickerOptions.length > 0,
+    priority: 0,
+    handle: handleProjectPick,
+  });
+
   const openIsolationPicker = useCallback(() => {
     setIsolationPickerOpen(true);
   }, []);
@@ -2109,13 +2130,6 @@ export function NewWorkspaceScreen({
     },
   });
 
-  const composerFooter = useMemo(
-    () =>
-      agentControlsWithDisabled ? (
-        <DraftAgentModeControl placement="footer" {...agentControlsWithDisabled} />
-      ) : null,
-    [agentControlsWithDisabled],
-  );
   const screenHeaderLeft = useMemo(() => <SidebarMenuToggle />, []);
 
   return (
@@ -2154,7 +2168,6 @@ export function NewWorkspaceScreen({
             autoFocus
             commandDraftConfig={composerState?.commandDraftConfig}
             agentControls={agentControlsWithDisabled}
-            footer={composerFooter}
           />
           {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
         </ReanimatedAnimated.View>
