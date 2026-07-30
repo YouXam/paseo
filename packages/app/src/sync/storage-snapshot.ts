@@ -120,42 +120,48 @@ function normalizeSyncStorageSnapshot(value: unknown): SyncStorageSnapshot {
   };
 }
 
-async function rehydratePersistedStores(): Promise<void> {
-  await Promise.all([
-    Promise.resolve(useWorkspaceLayoutStore.persist.rehydrate()),
-    Promise.resolve(useDraftStore.persist.rehydrate()),
-    Promise.resolve(useSidebarOrderStore.persist.rehydrate()),
-    Promise.resolve(useReviewDraftStore.persist.rehydrate()),
-    Promise.resolve(usePanelStore.persist.rehydrate()),
-    Promise.resolve(useBrowserStore.persist.rehydrate()),
-    Promise.resolve(useSidebarViewStore.persist.rehydrate()),
-    Promise.resolve(useSidebarCollapsedSectionsStore.persist.rehydrate()),
-    Promise.resolve(usePinnedTargetsStore.persist.rehydrate()),
-  ]);
-}
-
-async function invalidateStorageBackedQueries(): Promise<void> {
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: APP_SETTINGS_QUERY_KEY }),
+// Side effect to refresh the store/query backing a key after it changes. Keys
+// absent here are read on demand and need no live refresh. Running only the
+// effects for keys that actually changed is what stops an unrelated change (e.g.
+// a remote draft edit) from reloading the host runtime and bouncing the whole
+// app to the welcome screen.
+const KEY_EFFECTS: Record<string, () => void | Promise<void>> = {
+  [HOST_REGISTRY_STORAGE_KEY]: () => getHostRuntimeStore().reloadFromStorage(),
+  "workspace-layout-state": () => useWorkspaceLayoutStore.persist.rehydrate(),
+  [DRAFTS_STORAGE_KEY]: () => useDraftStore.persist.rehydrate(),
+  "@paseo:review-draft-store": () => useReviewDraftStore.persist.rehydrate(),
+  "sidebar-project-workspace-order": () => useSidebarOrderStore.persist.rehydrate(),
+  "panel-state": () => usePanelStore.persist.rehydrate(),
+  "workspace-browser-store": () => useBrowserStore.persist.rehydrate(),
+  "sidebar-view": () => useSidebarViewStore.persist.rehydrate(),
+  "sidebar-collapsed-sections": () => useSidebarCollapsedSectionsStore.persist.rehydrate(),
+  "pinned-tab-targets": () => usePinnedTargetsStore.persist.rehydrate(),
+  "@paseo:app-settings": () => queryClient.invalidateQueries({ queryKey: APP_SETTINGS_QUERY_KEY }),
+  "@paseo:changes-preferences": () =>
     queryClient.invalidateQueries({ queryKey: CHANGES_PREFERENCES_QUERY_KEY }),
+  "@paseo:keyboard-shortcut-overrides": () =>
     queryClient.invalidateQueries({ queryKey: ["keyboard-shortcut-overrides"] }),
+  "@paseo:preferred-editor": () =>
     queryClient.invalidateQueries({ queryKey: ["preferred-editor"] }),
-  ]);
-}
+};
 
 export async function applySyncStorageSnapshot(snapshot: unknown): Promise<SyncStorageSnapshot> {
   const normalized = normalizeSyncStorageSnapshot(snapshot);
+  const changedKeys: string[] = [];
   for (const key of SYNC_STORAGE_KEYS) {
-    const value = normalized.storage[key];
-    if (value === null) {
+    const next = normalized.storage[key];
+    const current = sanitizeStorageValue(key, await AsyncStorage.getItem(key));
+    if (current === next) {
+      continue;
+    }
+    if (next === null) {
       await AsyncStorage.removeItem(key);
     } else {
-      await AsyncStorage.setItem(key, value);
+      await AsyncStorage.setItem(key, next);
     }
+    changedKeys.push(key);
   }
-  await getHostRuntimeStore().reloadFromStorage();
-  await rehydratePersistedStores();
-  await invalidateStorageBackedQueries();
+  await Promise.all(changedKeys.map((key) => Promise.resolve(KEY_EFFECTS[key]?.())));
   return normalized;
 }
 
