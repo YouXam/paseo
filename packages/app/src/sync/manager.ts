@@ -18,6 +18,7 @@ import {
   importSyncDataKey,
   type EncryptedSyncSnapshot,
 } from "@/sync/crypto";
+import { installSyncDebugPageMarkers, syncDebug } from "@/sync/debug";
 import { describeSyncStorageDivergence, mergeSyncStorageSnapshots } from "@/sync/merge";
 import {
   applySyncStorageSnapshot,
@@ -662,12 +663,10 @@ class CloudSyncManager {
     if (!remote) {
       return local;
     }
-    const divergence = describeSyncStorageDivergence(this.lastSyncedSnapshot, local, remote);
-    console.info(
-      `[CloudSync] revision conflict -> ${conflict.revision}; diverging keys: ${
-        divergence.join(", ") || "none"
-      }`,
-    );
+    syncDebug("push-conflict", {
+      revision: conflict.revision,
+      keys: describeSyncStorageDivergence(this.lastSyncedSnapshot, local, remote),
+    });
     const merged = mergeSyncStorageSnapshots(this.lastSyncedSnapshot, local, remote);
     this.lastSyncedSnapshot = remote;
     // Only touch storage / rehydrate the app when the merge brings in remote-only
@@ -682,6 +681,7 @@ class CloudSyncManager {
   }
 
   private async applyLocalSnapshot(snapshot: SyncStorageSnapshot): Promise<void> {
+    syncDebug("apply-snapshot");
     this.applyingRemote = true;
     try {
       await applySyncStorageSnapshot(snapshot);
@@ -711,9 +711,17 @@ class CloudSyncManager {
           response.snapshot,
         );
         const local = await readSyncStorageSnapshot(session.deviceId);
-        const merged = mergeSyncStorageSnapshots(this.lastSyncedSnapshot, local, remote);
+        const base = this.lastSyncedSnapshot;
+        const merged = mergeSyncStorageSnapshots(base, local, remote);
         this.lastSyncedSnapshot = remote;
-        if (fingerprintSyncStorageSnapshot(merged) !== fingerprintSyncStorageSnapshot(local)) {
+        const willApply =
+          fingerprintSyncStorageSnapshot(merged) !== fingerprintSyncStorageSnapshot(local);
+        syncDebug("keepalive-reconcile", {
+          revision: response.revision,
+          keys: describeSyncStorageDivergence(base, local, remote),
+          willApply,
+        });
+        if (willApply) {
           await this.applyLocalSnapshot(merged);
         }
         // Match the fingerprint to the merged local state so a keepalive never
@@ -779,6 +787,7 @@ class CloudSyncManager {
 }
 
 const cloudSyncManager = new CloudSyncManager();
+installSyncDebugPageMarkers();
 
 export function getCloudSyncManager(): CloudSyncManager {
   return cloudSyncManager;
