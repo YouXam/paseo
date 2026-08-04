@@ -40,9 +40,55 @@ interface WebSocketPair {
   1: WebSocket;
 }
 
+interface DurableObjectStorage {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+  put(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<boolean>;
+  getAlarm(): Promise<number | null>;
+  setAlarm(scheduledTime: number): Promise<void>;
+  deleteAlarm(): Promise<void>;
+}
+
 interface DurableObjectState {
   acceptWebSocket(ws: WebSocket, tags?: string[]): void;
   getWebSockets(tag?: string): WebSocket[];
+  storage: DurableObjectStorage;
+}
+
+/**
+ * Pending control-liveness check for one connectionId, persisted in DO storage.
+ *
+ * "nudge" -> resend a sync list; "reset" -> force-close the control socket.
+ */
+type ControlWatchStage = "nudge" | "reset";
+
+interface ControlWatchEntry {
+  stage: ControlWatchStage;
+  dueAt: number;
+}
+
+type ControlWatchMap = Record<string, ControlWatchEntry>;
+
+const CONTROL_WATCH_KEY = "controlWatch";
+const CONTROL_WATCH_NUDGE_DELAY_MS = 10_000;
+const CONTROL_WATCH_RESET_DELAY_MS = 5_000;
+
+function isControlWatchStage(value: unknown): value is ControlWatchStage {
+  return value === "nudge" || value === "reset";
+}
+
+function parseControlWatchMap(raw: unknown): ControlWatchMap {
+  if (!isRecord(raw)) return {};
+  const out: ControlWatchMap = {};
+  for (const [connectionId, entryRaw] of Object.entries(raw)) {
+    if (!connectionId || !isRecord(entryRaw)) continue;
+    const { stage, dueAt } = entryRaw;
+    if (!isControlWatchStage(stage) || typeof dueAt !== "number" || !Number.isFinite(dueAt)) {
+      continue;
+    }
+    out[connectionId] = { stage, dueAt };
+  }
+  return out;
 }
 
 interface WebSocketWithAttachment extends WebSocket {
@@ -216,37 +262,129 @@ export class RelayDurableObject {
     }
   }
 
-  private nudgeOrResetControlForConnection(connectionId: string): void {
+  private async readControlWatch(): Promise<ControlWatchMap> {
+    try {
+      return parseControlWatchMap(await this.state.storage.get(CONTROL_WATCH_KEY));
+    } catch {
+      return {};
+    }
+  }
+
+  private async writeControlWatch(watch: ControlWatchMap): Promise<void> {
+    try {
+      if (Object.keys(watch).length === 0) {
+        await this.state.storage.delete(CONTROL_WATCH_KEY);
+        return;
+      }
+      await this.state.storage.put(CONTROL_WATCH_KEY, watch);
+    } catch {
+      // ignore storage failures: worst case we lose a liveness check, same as before
+    }
+  }
+
+  /**
+   * Ensure the DO alarm fires no later than `dueAt`.
+   *
+   * Alarms are per-DO (one pending at a time), so the earliest due entry owns the alarm and
+   * `alarm()` re-arms for whatever remains.
+   */
+  private async ensureAlarmAt(dueAt: number): Promise<void> {
+    try {
+      const existing = await this.state.storage.getAlarm();
+      if (existing != null && existing <= dueAt) return;
+      await this.state.storage.setAlarm(dueAt);
+    } catch {
+      // ignore
+    }
+  }
+
+  private async nudgeOrResetControlForConnection(connectionId: string): Promise<void> {
     // If the daemon's control WS becomes half-open, the DO can't reliably detect it via ws.send errors
     // (Cloudflare may accept writes even if the other side is no longer reading).
     //
     // Instead, observe whether the daemon reacts by opening the per-connection server-data socket.
     // If it doesn't, nudge with a sync message; if still no reaction, force-close the control
     // socket(s) so the daemon reconnects.
-    const initialDelayMs = 10_000;
-    const secondDelayMs = 5_000;
+    //
+    // This MUST be driven by DO alarms, not setTimeout. Between hibernation-API events the runtime
+    // is free to evict this DO instance, and an evicted instance loses every pending setTimeout
+    // without running it. The daemon can't cover for us either: its control keepalive is a
+    // WebSocket protocol ping that Cloudflare's edge answers without waking the DO, so a control
+    // socket the DO no longer knows about still looks perfectly healthy from the daemon side.
+    // With setTimeout, that combination stalls a server indefinitely — both ends believe they are
+    // connected and neither reconnects. Alarms survive eviction, so the check always runs.
+    const dueAt = Date.now() + CONTROL_WATCH_NUDGE_DELAY_MS;
+    const watch = await this.readControlWatch();
+    watch[connectionId] = { stage: "nudge", dueAt };
+    await this.writeControlWatch(watch);
+    await this.ensureAlarmAt(dueAt);
+  }
 
-    setTimeout(() => {
-      if (!this.hasClientSocket(connectionId)) return;
-      if (this.hasServerDataSocket(connectionId)) return;
+  /**
+   * Advance one pending control-liveness check.
+   *
+   * Returns the entry to keep (with its next stage/dueAt), or null when the check is finished or
+   * no longer needed.
+   */
+  private stepControlWatch(
+    connectionId: string,
+    entry: ControlWatchEntry,
+    now: number,
+  ): ControlWatchEntry | null {
+    // The daemon reacted, or the client gave up waiting: nothing left to check.
+    if (!this.hasClientSocket(connectionId)) return null;
+    if (this.hasServerDataSocket(connectionId)) return null;
 
+    if (entry.stage === "nudge") {
       // First nudge: send a full sync list.
       this.notifyControls({ type: "sync", connectionIds: this.listConnectedConnectionIds() });
+      return { stage: "reset", dueAt: now + CONTROL_WATCH_RESET_DELAY_MS };
+    }
 
-      setTimeout(() => {
-        if (!this.hasClientSocket(connectionId)) return;
-        if (this.hasServerDataSocket(connectionId)) return;
+    // Still nothing: assume control is stuck and force a reconnect.
+    for (const ws of this.state.getWebSockets("server-control")) {
+      try {
+        ws.close(1011, "Control unresponsive");
+      } catch {
+        // ignore
+      }
+    }
+    return null;
+  }
 
-        // Still nothing: assume control is stuck and force a reconnect.
-        for (const ws of this.state.getWebSockets("server-control")) {
-          try {
-            ws.close(1011, "Control unresponsive");
-          } catch {
-            // ignore
-          }
-        }
-      }, secondDelayMs);
-    }, initialDelayMs);
+  /**
+   * Alarm handler: runs pending control-liveness checks (see nudgeOrResetControlForConnection).
+   *
+   * Survives hibernation and instance eviction, which is the whole point of using an alarm here.
+   */
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const watch = await this.readControlWatch();
+    const next: ControlWatchMap = {};
+
+    for (const [connectionId, entry] of Object.entries(watch)) {
+      if (entry.dueAt > now) {
+        // Not due yet (it belongs to a later alarm): keep as-is.
+        next[connectionId] = entry;
+        continue;
+      }
+      const stepped = this.stepControlWatch(connectionId, entry, now);
+      if (stepped) next[connectionId] = stepped;
+    }
+
+    await this.writeControlWatch(next);
+
+    let earliest: number | null = null;
+    for (const entry of Object.values(next)) {
+      if (earliest == null || entry.dueAt < earliest) earliest = entry.dueAt;
+    }
+    if (earliest != null) {
+      try {
+        await this.state.storage.setAlarm(earliest);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   private bufferFrame(connectionId: string, message: string | ArrayBuffer): void {
@@ -335,12 +473,12 @@ export class RelayDurableObject {
     return this.asSwitchingProtocolsResponse(client);
   }
 
-  private fetchV2(
+  private async fetchV2(
     request: Request,
     role: ConnectionRole,
     serverId: string,
     connectionId: string,
-  ): Response {
+  ): Promise<Response> {
     const upgradeError = this.requireWebSocketUpgrade(request);
     if (upgradeError) return upgradeError;
 
@@ -393,7 +531,7 @@ export class RelayDurableObject {
 
     if (role === "client") {
       this.notifyControls({ type: "connected", connectionId: resolvedConnectionId });
-      this.nudgeOrResetControlForConnection(resolvedConnectionId);
+      await this.nudgeOrResetControlForConnection(resolvedConnectionId);
     }
 
     if (isServerControl) {
@@ -439,7 +577,7 @@ export class RelayDurableObject {
       return this.fetchV1(request, role, serverId);
     }
 
-    return this.fetchV2(request, role, serverId, connectionId);
+    return await this.fetchV2(request, role, serverId, connectionId);
   }
 
   /**
