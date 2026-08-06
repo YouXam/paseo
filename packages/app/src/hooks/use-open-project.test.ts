@@ -4,10 +4,7 @@ import {
   getOpenProjectFailureReason,
   openProjectDirectly,
 } from "@/hooks/open-project";
-import type {
-  EmptyProjectDescriptor as ProjectWithoutWorkspacesDescriptor,
-  WorkspaceDescriptor,
-} from "@/stores/session-store";
+import type { ProjectDescriptor, WorkspaceDescriptor } from "@/stores/session-store";
 
 const SERVER_ID = "server-1";
 const PROJECT_PATH = "/repo/project";
@@ -24,17 +21,17 @@ function buildProjectPayload() {
 
 interface RecordedProject {
   serverId: string;
-  project: ProjectWithoutWorkspacesDescriptor;
-}
-
-interface RecordedMerge {
-  serverId: string;
-  workspaces: WorkspaceDescriptor[];
+  project: ProjectDescriptor;
 }
 
 interface RecordedHydrated {
   serverId: string;
   hydrated: boolean;
+}
+
+interface RecordedMerge {
+  serverId: string;
+  workspaces: WorkspaceDescriptor[];
 }
 
 interface RecordedClone {
@@ -51,7 +48,7 @@ function createFakeSession() {
     projects,
     merges,
     hydrated,
-    addEmptyProject: (serverId: string, project: ProjectWithoutWorkspacesDescriptor) => {
+    upsertProject: (serverId: string, project: ProjectDescriptor) => {
       projects.push({ serverId, project });
     },
     mergeWorkspaces: (serverId: string, workspaces: Iterable<WorkspaceDescriptor>) => {
@@ -91,11 +88,7 @@ describe("openProjectDirectly", () => {
       isConnected: true,
       canAddProject: true,
       client: {
-        getCheckoutStatus: async () =>
-          ({
-            isGit: true,
-            mainRepoRoot: null,
-          }) as never,
+        getCheckoutStatus: async () => ({ isGit: true, mainRepoRoot: null }) as never,
         createWorkspace: async () => {
           throw new Error("createWorkspace should not be called");
         },
@@ -105,8 +98,8 @@ describe("openProjectDirectly", () => {
           project: projectPayload,
         }),
       },
-      addEmptyProject: session.addEmptyProject,
       mergeWorkspaces: session.mergeWorkspaces,
+      upsertProject: session.upsertProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
@@ -116,8 +109,10 @@ describe("openProjectDirectly", () => {
         serverId: SERVER_ID,
         project: {
           projectId: "project-1",
+          projectKey: null,
           projectDisplayName: "project",
           projectCustomName: null,
+          projectCustomIconRevision: null,
           projectKind: "git",
           projectRootPath: PROJECT_PATH,
         },
@@ -139,7 +134,7 @@ describe("openProjectDirectly", () => {
         getCheckoutStatus: async () =>
           ({
             isGit: true,
-            mainRepoRoot: "/repo/project",
+            mainRepoRoot: PROJECT_PATH,
           }) as never,
         createWorkspace: async () => ({
           requestId: "request-worktree",
@@ -150,7 +145,7 @@ describe("openProjectDirectly", () => {
             projectId: "project-1",
             projectDisplayName: "project",
             projectCustomName: null,
-            projectRootPath: "/repo/project",
+            projectRootPath: PROJECT_PATH,
             workspaceDirectory: WORKTREE_PATH,
             projectKind: "git",
             workspaceKind: "worktree",
@@ -175,8 +170,8 @@ describe("openProjectDirectly", () => {
           };
         },
       },
-      addEmptyProject: session.addEmptyProject,
       mergeWorkspaces: session.mergeWorkspaces,
+      upsertProject: session.upsertProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
@@ -218,8 +213,8 @@ describe("openProjectDirectly", () => {
           project: buildProjectPayload(),
         }),
       },
-      addEmptyProject: session.addEmptyProject,
       mergeWorkspaces: session.mergeWorkspaces,
+      upsertProject: session.upsertProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
@@ -241,11 +236,7 @@ describe("openProjectDirectly", () => {
       isConnected: true,
       canAddProject: true,
       client: {
-        getCheckoutStatus: async () =>
-          ({
-            isGit: true,
-            mainRepoRoot: null,
-          }) as never,
+        getCheckoutStatus: async () => ({ isGit: true, mainRepoRoot: null }) as never,
         createWorkspace: async () => {
           throw new Error("createWorkspace should not be called");
         },
@@ -256,8 +247,8 @@ describe("openProjectDirectly", () => {
           project: null,
         }),
       },
-      addEmptyProject: session.addEmptyProject,
       mergeWorkspaces: session.mergeWorkspaces,
+      upsertProject: session.upsertProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
@@ -284,7 +275,7 @@ describe("cloneGithubProjectDirectly", () => {
       cloneProtocol: "https",
       isConnected: true,
       client: github,
-      addEmptyProject: session.addEmptyProject,
+      upsertProject: session.upsertProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
@@ -302,6 +293,8 @@ describe("cloneGithubProjectDirectly", () => {
         project: {
           ...projectPayload,
           projectCustomName: null,
+          projectKey: null,
+          projectCustomIconRevision: null,
         },
       },
     ]);
@@ -319,7 +312,7 @@ describe("cloneGithubProjectDirectly", () => {
       cloneProtocol: "https",
       isConnected: true,
       client: github,
-      addEmptyProject: session.addEmptyProject,
+      upsertProject: session.upsertProject,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 

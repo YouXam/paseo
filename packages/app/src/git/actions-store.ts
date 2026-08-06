@@ -15,8 +15,6 @@ export type CheckoutGitAsyncActionId =
   | "push"
   | "pull-and-push"
   | "refresh"
-  | "stage-file"
-  | "unstage-file"
   | "create-pr"
   | "merge-pr-squash"
   | "merge-pr-merge"
@@ -89,12 +87,8 @@ function invalidateCheckoutGitQueries(serverId: string, cwd: string) {
 const successTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const inFlight = new Map<string, Promise<unknown>>();
 
-function inFlightKey(
-  key: CheckoutKey,
-  actionId: CheckoutGitAsyncActionId,
-  operationKey?: string,
-): string {
-  return `${key}::${actionId}${operationKey ? `::${operationKey}` : ""}`;
+function inFlightKey(key: CheckoutKey, actionId: CheckoutGitAsyncActionId): string {
+  return `${key}::${actionId}`;
 }
 
 interface CheckoutGitActionsStoreState {
@@ -111,8 +105,6 @@ interface CheckoutGitActionsStoreState {
   push: (params: { serverId: string; cwd: string }) => Promise<void>;
   pullAndPush: (params: { serverId: string; cwd: string }) => Promise<void>;
   refresh: (params: { serverId: string; cwd: string }) => Promise<void>;
-  stageFile: (params: { serverId: string; cwd: string; path: string }) => Promise<void>;
-  unstageFile: (params: { serverId: string; cwd: string; path: string }) => Promise<void>;
   createPr: (params: { serverId: string; cwd: string }) => Promise<void>;
   mergePr: (params: {
     serverId: string;
@@ -133,17 +125,15 @@ async function runCheckoutAction({
   serverId,
   cwd,
   actionId,
-  operationKey,
   run,
 }: {
   serverId: string;
   cwd: string;
   actionId: CheckoutGitAsyncActionId;
-  operationKey?: string;
   run: () => Promise<void>;
 }): Promise<void> {
   const key = checkoutKey(serverId, cwd);
-  const inflightId = inFlightKey(key, actionId, operationKey);
+  const inflightId = inFlightKey(key, actionId);
 
   const existing = inFlight.get(inflightId);
   if (existing) {
@@ -242,38 +232,6 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
       run: async () => {
         const client = resolveClient(serverId);
         const payload = await client.checkoutRefresh(cwd);
-        if (payload.error) {
-          throw new Error(payload.error.message);
-        }
-      },
-    });
-  },
-
-  stageFile: async ({ serverId, cwd, path }) => {
-    await runCheckoutAction({
-      serverId,
-      cwd,
-      actionId: "stage-file",
-      operationKey: path,
-      run: async () => {
-        const client = resolveClient(serverId);
-        const payload = await client.checkoutStageFile(cwd, path);
-        if (payload.error) {
-          throw new Error(payload.error.message);
-        }
-      },
-    });
-  },
-
-  unstageFile: async ({ serverId, cwd, path }) => {
-    await runCheckoutAction({
-      serverId,
-      cwd,
-      actionId: "unstage-file",
-      operationKey: path,
-      run: async () => {
-        const client = resolveClient(serverId);
-        const payload = await client.checkoutUnstageFile(cwd, path);
         if (payload.error) {
           throw new Error(payload.error.message);
         }

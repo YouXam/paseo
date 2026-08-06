@@ -143,19 +143,26 @@ function browserElementWorkspaceAttachment(): Extract<
 
 function createFakePersister(): AttachmentPersister & {
   blobCalls: Array<{ blob: Blob; mimeType: string; fileName: string | null }>;
+  dataUrlCalls: Array<{ dataUrl: string; mimeType: string; fileName: string | null }>;
   fileUriCalls: Array<{ uri: string; mimeType: string; fileName: string | null }>;
   deletedBatches: AttachmentMetadata[][];
 } {
   const blobCalls: Array<{ blob: Blob; mimeType: string; fileName: string | null }> = [];
+  const dataUrlCalls: Array<{ dataUrl: string; mimeType: string; fileName: string | null }> = [];
   const fileUriCalls: Array<{ uri: string; mimeType: string; fileName: string | null }> = [];
   const deletedBatches: AttachmentMetadata[][] = [];
   return {
     blobCalls,
+    dataUrlCalls,
     fileUriCalls,
     deletedBatches,
     persistFromBlob: async ({ blob, mimeType, fileName }) => {
       blobCalls.push({ blob, mimeType, fileName });
       return { ...imageMetadata, id: `blob-${blobCalls.length}` };
+    },
+    persistFromDataUrl: async ({ dataUrl, mimeType, fileName }) => {
+      dataUrlCalls.push({ dataUrl, mimeType, fileName });
+      return { ...imageMetadata, id: `data-url-${dataUrlCalls.length}` };
     },
     persistFromFileUri: async ({ uri, mimeType, fileName }) => {
       fileUriCalls.push({ uri, mimeType, fileName });
@@ -215,7 +222,6 @@ function createFakeStream(initialHead: Map<string, StreamItem[]> = new Map()): F
         ...stream,
         submissions: beginMessageSubmission(current.submissions, {
           clientMessageId: message.clientMessageId!,
-          submittedAt: message.timestamp,
         }),
       });
     },
@@ -223,7 +229,7 @@ function createFakeStream(initialHead: Map<string, StreamItem[]> = new Map()): F
       const current = readSubmission(fake, agentId);
       writeSubmission(fake, agentId, {
         ...current,
-        submissions: acceptMessageSubmission(current.submissions, clientMessageId, true, false),
+        submissions: acceptMessageSubmission(current.submissions, clientMessageId),
       });
     },
     reject: (agentId, clientMessageId) => {
@@ -291,7 +297,6 @@ describe("cancelComposerAgent", () => {
     isAgentRunning: boolean;
     isCancellingAgent: boolean;
     isConnected: boolean;
-    onCancelFailed: (error: unknown) => void;
   } {
     const canceledIds: string[] = [];
     return {
@@ -305,53 +310,45 @@ describe("cancelComposerAgent", () => {
       isAgentRunning: true,
       isCancellingAgent: false,
       isConnected: true,
-      onCancelFailed: () => undefined,
     };
   }
 
-  it("issues a cancel and reports true when the agent is running, connected, and not already canceling", () => {
+  it("returns the cancel request when the agent is running, connected, and not already canceling", async () => {
     const input = baseInput();
     const result = cancelComposerAgent(input);
-    expect(result).toBe(true);
+    expect(result).not.toBeNull();
+    await result;
     expect(input.client.canceledIds).toEqual(["agent"]);
   });
 
-  it("reports a rejected cancel so the composer can leave its canceling state", async () => {
+  it("returns a rejected cancel request to the composer", async () => {
     const cancellationError = new Error("Provider rejected the interrupt");
-    const failures: unknown[] = [];
     const input = baseInput();
     input.client.cancelAgent = async () => {
       throw cancellationError;
     };
 
-    const result = cancelComposerAgent({
-      ...input,
-      onCancelFailed: (error: unknown) => failures.push(error),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(result).toBe(true);
-    expect(failures).toEqual([cancellationError]);
+    await expect(cancelComposerAgent(input)).rejects.toBe(cancellationError);
   });
 
   it("does nothing when the agent is not running", () => {
     const input = baseInput();
     const result = cancelComposerAgent({ ...input, isAgentRunning: false });
-    expect(result).toBe(false);
+    expect(result).toBeNull();
     expect(input.client.canceledIds).toEqual([]);
   });
 
   it("does nothing when the agent is already being canceled", () => {
     const input = baseInput();
     const result = cancelComposerAgent({ ...input, isCancellingAgent: true });
-    expect(result).toBe(false);
+    expect(result).toBeNull();
     expect(input.client.canceledIds).toEqual([]);
   });
 
   it("does nothing when disconnected or the client is null", () => {
     const input = baseInput();
-    expect(cancelComposerAgent({ ...input, isConnected: false })).toBe(false);
-    expect(cancelComposerAgent({ ...input, client: null })).toBe(false);
+    expect(cancelComposerAgent({ ...input, isConnected: false })).toBeNull();
+    expect(cancelComposerAgent({ ...input, client: null })).toBeNull();
     expect(input.client.canceledIds).toEqual([]);
   });
 });
@@ -395,6 +392,25 @@ describe("pickAndPersistImages", () => {
     });
     expect(persister.fileUriCalls).toEqual([
       { uri: "/tmp/x.jpg", mimeType: "image/jpeg", fileName: null },
+    ]);
+    expect(result).toHaveLength(1);
+  });
+
+  it("persists data_url sources via persistFromDataUrl", async () => {
+    const persister = createFakePersister();
+    const dataUrl = "data:image/png;base64,AAEC";
+    const result = await pickAndPersistImages({
+      pickImages: async () => [
+        {
+          source: { kind: "data_url", dataUrl },
+          mimeType: "image/png",
+          fileName: "clipboard.png",
+        },
+      ],
+      persister,
+    });
+    expect(persister.dataUrlCalls).toEqual([
+      { dataUrl, mimeType: "image/png", fileName: "clipboard.png" },
     ]);
     expect(result).toHaveLength(1);
   });

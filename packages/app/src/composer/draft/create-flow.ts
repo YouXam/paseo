@@ -6,6 +6,7 @@ import {
   splitComposerAttachmentsForSubmit,
 } from "@/composer/attachments/submit";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
+import { handoffCreatedAgentMessageSubmission } from "@/composer/submission/writer";
 import { useSessionStore } from "@/stores/session-store";
 import {
   createUserMessage,
@@ -127,10 +128,6 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
   const updatePendingAgentId = useCreateFlowStore((state) => state.updateAgentId);
   const markPendingCreateLifecycle = useCreateFlowStore((state) => state.markLifecycle);
   const clearPendingCreateAttempt = useCreateFlowStore((state) => state.clear);
-  const handoffCreatedAgentUserMessage = useSessionStore(
-    (state) => state.handoffCreatedAgentUserMessage,
-  );
-
   const formErrorMessage = machine.tag === "draft" ? machine.errorMessage : "";
   const isSubmitting = machine.tag === "creating";
 
@@ -162,7 +159,6 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
     return [
       {
         clientMessageId: machine.attempt.clientMessageId,
-        submittedAt: machine.attempt.timestamp,
       },
     ];
   }, [machine]);
@@ -202,7 +198,7 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
 
         if (createResult.agentId) {
           updatePendingAgentId({ draftId, agentId: createResult.agentId });
-          handoffCreatedAgentUserMessage(
+          handoffCreatedAgentMessageSubmission(
             pendingServerId,
             createResult.agentId,
             createUserMessage({
@@ -228,7 +224,6 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
       }
     },
     [
-      handoffCreatedAgentUserMessage,
       clearPendingCreateAttempt,
       createRequest,
       draftId,

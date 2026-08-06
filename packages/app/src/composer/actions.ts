@@ -34,6 +34,11 @@ export interface AttachmentPersister {
     mimeType: string;
     fileName: string | null;
   }) => Promise<AttachmentMetadata>;
+  persistFromDataUrl: (input: {
+    dataUrl: string;
+    mimeType: string;
+    fileName: string | null;
+  }) => Promise<AttachmentMetadata>;
   deleteAttachments: (metadata: AttachmentMetadata[]) => Promise<void> | void;
 }
 
@@ -46,7 +51,7 @@ export interface ComposerSendClient {
       images: Array<{ data: string; mimeType: string }>;
       attachments: ReturnType<typeof splitComposerAttachmentsForSubmit>["attachments"];
     },
-  ) => Promise<void | { outOfBand?: boolean }>;
+  ) => Promise<void>;
   uploadFile: (input: { fileName: string; mimeType: string; bytes: Uint8Array }) => Promise<{
     requestId: string;
     file: {
@@ -67,7 +72,7 @@ export interface ComposerCancelClient {
 
 export interface MessageSubmissionWriter {
   begin: (agentId: string, message: UserMessageItem) => void;
-  accept: (agentId: string, clientMessageId: string, outOfBand: boolean | undefined) => void;
+  accept: (agentId: string, clientMessageId: string) => void;
   reject: (agentId: string, clientMessageId: string) => MessageSubmissionRejectionOutcome;
 }
 
@@ -80,7 +85,10 @@ export interface QueueWriter {
 
 export async function pickAndPersistImages(input: {
   pickImages: () => Promise<PickedImageAttachmentInput[] | null>;
-  persister: Pick<AttachmentPersister, "persistFromBlob" | "persistFromFileUri">;
+  persister: Pick<
+    AttachmentPersister,
+    "persistFromBlob" | "persistFromFileUri" | "persistFromDataUrl"
+  >;
 }): Promise<AttachmentMetadata[]> {
   const result = await input.pickImages();
   if (!result?.length) return [];
@@ -91,6 +99,13 @@ export async function pickAndPersistImages(input: {
       if (picked.source.kind === "blob") {
         return await input.persister.persistFromBlob({
           blob: picked.source.blob,
+          mimeType,
+          fileName,
+        });
+      }
+      if (picked.source.kind === "data_url") {
+        return await input.persister.persistFromDataUrl({
+          dataUrl: picked.source.dataUrl,
           mimeType,
           fileName,
         });
@@ -139,19 +154,16 @@ export interface CancelComposerAgentInput {
   isAgentRunning: boolean;
   isCancellingAgent: boolean;
   isConnected: boolean;
-  onCancelFailed: (error: unknown) => void;
 }
 
-export function cancelComposerAgent(input: CancelComposerAgentInput): boolean {
-  if (!input.isAgentRunning || input.isCancellingAgent) return false;
-  if (!input.isConnected || !input.client) return false;
+export function cancelComposerAgent(input: CancelComposerAgentInput): Promise<void> | null {
+  if (!input.isAgentRunning || input.isCancellingAgent) return null;
+  if (!input.isConnected || !input.client) return null;
   try {
-    void Promise.resolve(input.client.cancelAgent(input.agentId)).catch(input.onCancelFailed);
+    return Promise.resolve(input.client.cancelAgent(input.agentId));
   } catch (error) {
-    input.onCancelFailed(error);
-    return false;
+    return Promise.reject(error);
   }
-  return true;
 }
 
 export interface DispatchComposerAgentMessageInput {
@@ -183,12 +195,12 @@ export async function dispatchComposerAgentMessage(
   input.submission.begin(input.agentId, userMessage);
   try {
     const imagesData = await input.encodeImages(wirePayload.images);
-    const result = await input.client.sendAgentMessage(input.agentId, input.text, {
+    await input.client.sendAgentMessage(input.agentId, input.text, {
       messageId: clientMessageId,
       images: imagesData ?? [],
       attachments: wirePayload.attachments,
     });
-    input.submission.accept(input.agentId, clientMessageId, result?.outOfBand);
+    input.submission.accept(input.agentId, clientMessageId);
   } catch (error) {
     const outcome = input.submission.reject(input.agentId, clientMessageId);
     if (outcome === "accepted") return;

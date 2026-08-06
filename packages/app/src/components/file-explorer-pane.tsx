@@ -12,7 +12,7 @@ import {
   type ViewStyle,
 } from "react-native";
 import { StyleSheet, useUnistyles, withUnistyles } from "react-native-unistyles";
-import { WORKSPACE_SECONDARY_HEADER_HEIGHT } from "@/constants/layout";
+import { useIsCompactFormFactor, WORKSPACE_SECONDARY_HEADER_HEIGHT } from "@/constants/layout";
 import * as Clipboard from "expo-clipboard";
 import { ChevronDown, Eye, EyeOff, RotateCw } from "lucide-react-native";
 import { MaterialFileIcon } from "@/components/material-file-icon";
@@ -20,20 +20,41 @@ import {
   TreeChevron,
   TreeIndentGuides,
   treeRowPaddingLeft,
+  WORKSPACE_FILE_ROW_TRAILING_PADDING,
   WORKSPACE_FILE_ROW_VERTICAL_PADDING,
+  WORKSPACE_TREE_ICON_LABEL_GAP,
+  WORKSPACE_TREE_ICON_SIZE,
+  WORKSPACE_TREE_LOADING_ICON_SIZE,
 } from "@/components/tree-primitives";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import {
+  useOverlayFlatListScrollbar,
+  type OverlayFlatListScrollbar,
+} from "@/components/ui/overlay-scrollbar/use-overlay-flat-list-scrollbar";
 import type { Theme } from "@/styles/theme";
-import type { AgentFileExplorerState, ExplorerEntry } from "@/stores/session-store";
+import type {
+  AgentFileExplorerState,
+  ExplorerDirectory,
+  ExplorerEntry,
+} from "@/stores/session-store";
 import { useSessionStore } from "@/stores/session-store";
-import { FileActionsMenu } from "@/components/file-actions-menu";
+import { FileActionsContextMenuContent } from "@/components/file-actions-menu";
+import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu";
 import { useFileDownload } from "@/hooks/use-file-download";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
 import { buildWorkspaceExplorerStateKey } from "@/hooks/use-file-explorer-actions";
-import { usePanelStore, type SortOption } from "@/stores/panel-store";
+import { usePanelStore, type ExpandedPathsUpdate, type SortOption } from "@/stores/panel-store";
 import { formatTimeAgo } from "@/utils/time";
 import { buildAbsoluteExplorerPath } from "@/utils/explorer-paths";
-import { filterVisibleExplorerEntries, isHiddenExplorerPath } from "@/file-explorer/visibility";
+import { isHiddenExplorerPath } from "@/file-explorer/visibility";
+import {
+  flattenExplorerTree,
+  reconcileRestoredExpandedPaths,
+  restoreExpandedDirectories,
+  setExpandedDirectoryPath,
+  showHiddenFilesAndRestoreExpandedDirectories,
+  type ExplorerTreeRow,
+} from "@/file-explorer/tree";
 import { useWorkspaceFileDragSource } from "@/attachments/use-workspace-file-drag-source";
 
 const SORT_OPTIONS: { value: SortOption }[] = [
@@ -83,7 +104,7 @@ function iconButtonStyle({ hovered, pressed }: PressableStateCallbackType & { ho
   return [styles.iconButton, (Boolean(hovered) || pressed) && styles.iconButtonHovered];
 }
 
-function treeRowKeyExtractor(row: TreeRow) {
+function treeRowKeyExtractor(row: ExplorerTreeRow) {
   return row.entry.path;
 }
 
@@ -160,34 +181,40 @@ function TreeRowItem({
   );
 
   return (
-    <Pressable onPress={handlePress} style={pressableStyle} testID={testID}>
-      <TreeIndentGuides depth={depth} />
-      <View ref={dragSourceRef} style={styles.entryInfo}>
-        <View style={styles.entryIcon}>
-          {(() => {
-            if (!isDirectory) {
-              return <MaterialFileIcon fileName={entry.name} size={16} />;
-            }
-            if (loading) {
-              return <ThemedLoadingSpinner size="small" uniProps={foregroundMutedColorMapping} />;
-            }
-            return <TreeChevron expanded={isExpanded} />;
-          })()}
+    <ContextMenu>
+      <ContextMenuTrigger onPress={handlePress} style={pressableStyle} testID={testID}>
+        <TreeIndentGuides depth={depth} />
+        <View ref={dragSourceRef} style={styles.entryInfo}>
+          <View style={styles.entryIcon}>
+            {(() => {
+              if (!isDirectory) {
+                return <MaterialFileIcon fileName={entry.name} size={WORKSPACE_TREE_ICON_SIZE} />;
+              }
+              if (loading) {
+                return (
+                  <ThemedLoadingSpinner
+                    size={WORKSPACE_TREE_LOADING_ICON_SIZE}
+                    uniProps={foregroundMutedColorMapping}
+                  />
+                );
+              }
+              return <TreeChevron expanded={isExpanded} />;
+            })()}
+          </View>
+          <Text style={styles.entryName} numberOfLines={1}>
+            {entry.name}
+          </Text>
         </View>
-        <Text style={styles.entryName} numberOfLines={1}>
-          {entry.name}
-        </Text>
-      </View>
-      <FileActionsMenu
+      </ContextMenuTrigger>
+      <FileActionsContextMenuContent
         fileKind={entry.kind}
         onCopyPath={handleCopy}
         onDownload={handleDownload}
         onAddToChat={onAddToChat ? handleAddToChat : undefined}
         header={metaHeader}
-        accessibilityLabel={t("workspace.fileActions.moreActions")}
         testIDPrefix={testID}
       />
-    </Pressable>
+    </ContextMenu>
   );
 }
 
@@ -199,11 +226,6 @@ interface FileExplorerPaneProps {
   onAddToChat?: (path: string) => void;
 }
 
-interface TreeRow {
-  entry: ExplorerEntry;
-  depth: number;
-}
-
 export function FileExplorerPane({
   serverId,
   workspaceId,
@@ -212,6 +234,7 @@ export function FileExplorerPane({
   onAddToChat,
 }: FileExplorerPaneProps) {
   const { t } = useTranslation();
+  const isCompact = useIsCompactFormFactor();
 
   const normalizedWorkspaceRoot = useMemo(() => workspaceRoot.trim(), [workspaceRoot]);
   const workspaceStateKey = useMemo(
@@ -263,7 +286,8 @@ export function FileExplorerPane({
     [isExplorerLoading, pendingRequest],
   );
 
-  const treeListRef = useRef<FlatList<TreeRow>>(null);
+  const treeListRef = useRef<FlatList<ExplorerTreeRow>>(null);
+  const scrollbar = useOverlayFlatListScrollbar(treeListRef, { enabled: !isCompact });
 
   const hasInitializedRef = useRef(false);
 
@@ -276,9 +300,19 @@ export function FileExplorerPane({
       hasWorkspaceScope,
       hasInitializedRef,
       workspaceStateKey,
+      persistedExpandedPaths: expandedPaths,
+      showHiddenFiles,
       requestDirectoryListing,
+      setExpandedPathsForWorkspace,
     });
-  }, [hasWorkspaceScope, requestDirectoryListing, workspaceStateKey]);
+  }, [
+    expandedPaths,
+    hasWorkspaceScope,
+    requestDirectoryListing,
+    setExpandedPathsForWorkspace,
+    showHiddenFiles,
+    workspaceStateKey,
+  ]);
 
   const handleToggleDirectory = useCallback(
     (entry: ExplorerEntry) =>
@@ -351,11 +385,42 @@ export function FileExplorerPane({
 
   const handleToggleHiddenFiles = useCallback(() => {
     const willShow = !usePanelStore.getState().explorerShowHiddenFiles;
-    toggleExplorerShowHiddenFiles();
-    if (willShow) {
-      requestPersistedExpandedPaths({ workspaceStateKey, requestDirectoryListing });
+    if (!willShow) {
+      toggleExplorerShowHiddenFiles();
+      return;
     }
-  }, [requestDirectoryListing, toggleExplorerShowHiddenFiles, workspaceStateKey]);
+    const rootDirectory = directories.get(".");
+    if (!rootDirectory || !workspaceStateKey) {
+      toggleExplorerShowHiddenFiles();
+      return;
+    }
+    void showHiddenFilesAndRestoreExpandedDirectories({
+      rootDirectory,
+      persistedExpandedPaths: expandedPaths,
+      showHiddenFiles: toggleExplorerShowHiddenFiles,
+      requestDirectoryListing: (path) =>
+        requestDirectoryListing(path, {
+          recordHistory: false,
+          setCurrentPath: false,
+        }),
+    }).then((restoredPaths) => {
+      setExpandedPathsForWorkspace(workspaceStateKey, (currentPaths) =>
+        reconcileRestoredExpandedPaths({
+          persistedExpandedPaths: expandedPaths,
+          currentExpandedPaths: new Set(currentPaths),
+          restoredExpandedPaths: restoredPaths,
+        }),
+      );
+      return null;
+    });
+  }, [
+    directories,
+    expandedPaths,
+    requestDirectoryListing,
+    setExpandedPathsForWorkspace,
+    toggleExplorerShowHiddenFiles,
+    workspaceStateKey,
+  ]);
 
   const refreshExplorer = useCallback(
     () =>
@@ -387,7 +452,7 @@ export function FileExplorerPane({
   const currentSortLabel = resolveCurrentSortLabel(sortOption, sortLabels);
 
   const treeRows = useMemo(
-    () => resolveTreeRows({ directories, expandedPaths, sortOption, showHiddenFiles }),
+    () => flattenExplorerTree({ directories, expandedPaths, sortOption, showHiddenFiles }),
     [directories, expandedPaths, showHiddenFiles, sortOption],
   );
 
@@ -400,7 +465,7 @@ export function FileExplorerPane({
   const errorRecoveryPath = useMemo(() => getErrorRecoveryPath(explorerState), [explorerState]);
 
   const renderTreeRow = useCallback(
-    (info: ListRenderItemInfo<TreeRow>) => (
+    (info: ListRenderItemInfo<ExplorerTreeRow>) => (
       <TreeRowDispatcher
         serverId={serverId}
         workspaceId={workspaceId}
@@ -463,6 +528,7 @@ export function FileExplorerPane({
         currentSortLabel={currentSortLabel}
         isRefreshFetching={isRefreshFetching}
         treeListRef={treeListRef}
+        scrollbar={scrollbar}
         renderTreeRow={renderTreeRow}
         handleSortCycle={handleSortCycle}
         handleToggleHiddenFiles={handleToggleHiddenFiles}
@@ -480,11 +546,12 @@ interface FileExplorerPaneContentProps {
   error: string | null;
   showInitialLoading: boolean;
   showBackFromError: boolean;
-  treeRows: TreeRow[];
+  treeRows: ExplorerTreeRow[];
   currentSortLabel: string;
   isRefreshFetching: boolean;
-  treeListRef: RefObject<FlatList<TreeRow> | null>;
-  renderTreeRow: (info: ListRenderItemInfo<TreeRow>) => ReactElement;
+  treeListRef: RefObject<FlatList<ExplorerTreeRow> | null>;
+  scrollbar: OverlayFlatListScrollbar;
+  renderTreeRow: (info: ListRenderItemInfo<ExplorerTreeRow>) => ReactElement;
   handleSortCycle: () => void;
   handleToggleHiddenFiles: () => void;
   handleRefresh: () => void;
@@ -505,6 +572,7 @@ function FileExplorerPaneContent(props: FileExplorerPaneContentProps) {
     currentSortLabel,
     isRefreshFetching,
     treeListRef,
+    scrollbar,
     renderTreeRow,
     handleSortCycle,
     handleToggleHiddenFiles,
@@ -627,79 +695,19 @@ function FileExplorerPaneContent(props: FileExplorerPaneContentProps) {
           keyExtractor={treeRowKeyExtractor}
           testID="file-explorer-tree-scroll"
           contentContainerStyle={styles.entriesContent}
-          showsVerticalScrollIndicator
+          onLayout={scrollbar.onLayout}
+          onScroll={scrollbar.onScroll}
+          onContentSizeChange={scrollbar.onContentSizeChange}
+          scrollEventThrottle={16}
+          showsVerticalScrollIndicator={!scrollbar.enabled}
           initialNumToRender={24}
           maxToRenderPerBatch={40}
           windowSize={12}
         />
       )}
+      {treeRows.length > 0 ? scrollbar.overlay : null}
     </View>
   );
-}
-
-function sortEntries(entries: ExplorerEntry[], sortOption: SortOption): ExplorerEntry[] {
-  const sorted = [...entries];
-  sorted.sort((a, b) => {
-    if (a.kind !== b.kind) {
-      return a.kind === "directory" ? -1 : 1;
-    }
-    switch (sortOption) {
-      case "name":
-        return a.name.localeCompare(b.name);
-      case "modified":
-        return new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime();
-      case "size":
-        return b.size - a.size;
-      default:
-        return 0;
-    }
-  });
-  return sorted;
-}
-
-function buildTreeRows({
-  directories,
-  expandedPaths,
-  sortOption,
-  showHiddenFiles,
-  path,
-  depth,
-}: {
-  directories: Map<string, { path: string; entries: ExplorerEntry[] }>;
-  expandedPaths: Set<string>;
-  sortOption: SortOption;
-  showHiddenFiles: boolean;
-  path: string;
-  depth: number;
-}): TreeRow[] {
-  const directory = directories.get(path);
-  if (!directory) {
-    return [];
-  }
-
-  const rows: TreeRow[] = [];
-  const entries = sortEntries(
-    filterVisibleExplorerEntries(directory.entries, showHiddenFiles),
-    sortOption,
-  );
-
-  for (const entry of entries) {
-    rows.push({ entry, depth });
-    if (entry.kind === "directory" && expandedPaths.has(entry.path)) {
-      rows.push(
-        ...buildTreeRows({
-          directories,
-          expandedPaths,
-          sortOption,
-          showHiddenFiles,
-          path: entry.path,
-          depth: depth + 1,
-        }),
-      );
-    }
-  }
-
-  return rows;
 }
 
 function deriveExplorerFields(state: AgentFileExplorerState | undefined) {
@@ -751,30 +759,6 @@ function resolveCurrentSortLabel(
   return labels[sortOption] ?? labels.name;
 }
 
-function resolveTreeRows({
-  directories,
-  expandedPaths,
-  sortOption,
-  showHiddenFiles,
-}: {
-  directories: Map<string, { path: string; entries: ExplorerEntry[] }>;
-  expandedPaths: Set<string>;
-  sortOption: SortOption;
-  showHiddenFiles: boolean;
-}): TreeRow[] {
-  if (!directories.get(".")) {
-    return [];
-  }
-  return buildTreeRows({
-    directories,
-    expandedPaths,
-    sortOption,
-    showHiddenFiles,
-    path: ".",
-    depth: 0,
-  });
-}
-
 function toggleDirectory({
   entry,
   workspaceStateKey,
@@ -786,26 +770,25 @@ function toggleDirectory({
   entry: ExplorerEntry;
   workspaceStateKey: string | null;
   expandedPaths: Set<string>;
-  directories: Map<string, { path: string; entries: ExplorerEntry[] }>;
+  directories: Map<string, ExplorerDirectory>;
   requestDirectoryListing: (
     path: string,
     opts?: { recordHistory?: boolean; setCurrentPath?: boolean },
-  ) => Promise<boolean>;
-  setExpandedPathsForWorkspace: (workspaceStateKey: string, paths: string[]) => void;
+  ) => Promise<ExplorerDirectory | null>;
+  setExpandedPathsForWorkspace: (workspaceStateKey: string, paths: ExpandedPathsUpdate) => void;
 }): void {
   if (!workspaceStateKey) {
     return;
   }
   const isExpanded = expandedPaths.has(entry.path);
-  if (isExpanded) {
-    setExpandedPathsForWorkspace(
-      workspaceStateKey,
-      Array.from(expandedPaths).filter((path) => path !== entry.path),
-    );
-    return;
-  }
-  setExpandedPathsForWorkspace(workspaceStateKey, [...Array.from(expandedPaths), entry.path]);
-  if (!directories.has(entry.path)) {
+  setExpandedPathsForWorkspace(workspaceStateKey, (currentPaths) =>
+    setExpandedDirectoryPath({
+      currentExpandedPaths: currentPaths,
+      directoryPath: entry.path,
+      expanded: !isExpanded,
+    }),
+  );
+  if (!isExpanded && !directories.has(entry.path)) {
     void requestDirectoryListing(entry.path, {
       recordHistory: false,
       setCurrentPath: false,
@@ -827,7 +810,7 @@ function TreeRowDispatcher({
 }: {
   serverId: string;
   workspaceId?: string | null;
-  info: ListRenderItemInfo<TreeRow>;
+  info: ListRenderItemInfo<ExplorerTreeRow>;
   expandedPaths: Set<string>;
   selectedEntryPath: string | null;
   isDirectoryLoading: (path: string) => boolean;
@@ -865,54 +848,59 @@ async function initializeExplorer({
   hasWorkspaceScope,
   hasInitializedRef,
   workspaceStateKey,
+  persistedExpandedPaths,
+  showHiddenFiles,
   requestDirectoryListing,
+  setExpandedPathsForWorkspace,
 }: {
   hasWorkspaceScope: boolean;
   hasInitializedRef: RefObject<boolean>;
   workspaceStateKey: string | null;
+  persistedExpandedPaths: ReadonlySet<string>;
+  showHiddenFiles: boolean;
   requestDirectoryListing: (
     path: string,
     opts?: { recordHistory?: boolean; setCurrentPath?: boolean },
-  ) => Promise<boolean>;
+  ) => Promise<ExplorerDirectory | null>;
+  setExpandedPathsForWorkspace: (workspaceStateKey: string, paths: ExpandedPathsUpdate) => void;
 }): Promise<void> {
   if (!hasWorkspaceScope || hasInitializedRef.current) {
     return;
   }
   hasInitializedRef.current = true;
-  const succeeded = await requestDirectoryListing(".", {
+  const rootDirectory = await requestDirectoryListing(".", {
     recordHistory: false,
     setCurrentPath: false,
   });
-  if (!succeeded) {
+  if (!rootDirectory) {
     hasInitializedRef.current = false;
     return;
   }
-  requestPersistedExpandedPaths({ workspaceStateKey, requestDirectoryListing });
-}
-
-function requestPersistedExpandedPaths({
-  workspaceStateKey,
-  requestDirectoryListing,
-}: {
-  workspaceStateKey: string | null;
-  requestDirectoryListing: (
-    path: string,
-    opts?: { recordHistory?: boolean; setCurrentPath?: boolean },
-  ) => Promise<boolean>;
-}): void {
-  const showHiddenFiles = usePanelStore.getState().explorerShowHiddenFiles;
-  const persistedPaths = usePanelStore.getState().expandedPathsByWorkspace[workspaceStateKey ?? ""];
-  if (!persistedPaths) {
+  if (!workspaceStateKey) {
     return;
   }
-  for (const path of persistedPaths) {
-    if (path !== "." && (showHiddenFiles || !isHiddenExplorerPath(path))) {
-      void requestDirectoryListing(path, {
+
+  const restoredPaths = await restoreExpandedDirectories({
+    rootDirectory,
+    persistedExpandedPaths,
+    showHiddenFiles,
+    requestDirectoryListing: (path) =>
+      requestDirectoryListing(path, {
         recordHistory: false,
         setCurrentPath: false,
-      });
-    }
-  }
+      }),
+  });
+  const hiddenPersistedPaths = showHiddenFiles
+    ? []
+    : Array.from(persistedExpandedPaths).filter(isHiddenExplorerPath);
+  const restoredPathsWithHidden = [...restoredPaths, ...hiddenPersistedPaths];
+  setExpandedPathsForWorkspace(workspaceStateKey, (currentPaths) =>
+    reconcileRestoredExpandedPaths({
+      persistedExpandedPaths,
+      currentExpandedPaths: new Set(currentPaths),
+      restoredExpandedPaths: restoredPathsWithHidden,
+    }),
+  );
 }
 
 async function refreshExplorerDirectories({
@@ -925,7 +913,7 @@ async function refreshExplorerDirectories({
   requestDirectoryListing: (
     path: string,
     opts?: { recordHistory?: boolean; setCurrentPath?: boolean },
-  ) => Promise<boolean>;
+  ) => Promise<ExplorerDirectory | null>;
 }): Promise<null> {
   if (!hasWorkspaceScope) {
     return null;
@@ -1085,7 +1073,7 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "space-between",
     paddingVertical: WORKSPACE_FILE_ROW_VERTICAL_PADDING,
-    paddingRight: theme.spacing[3],
+    paddingRight: WORKSPACE_FILE_ROW_TRAILING_PADDING,
   },
   entryRowActive: {
     backgroundColor: theme.colors.surfaceSidebarHover,
@@ -1094,10 +1082,14 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
+    gap: WORKSPACE_TREE_ICON_LABEL_GAP,
     minWidth: 0,
   },
   entryIcon: {
+    width: WORKSPACE_TREE_ICON_SIZE,
+    height: WORKSPACE_TREE_ICON_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
     flexShrink: 0,
   },
   entryName: {

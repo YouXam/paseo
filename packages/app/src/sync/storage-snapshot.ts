@@ -1,9 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { queryClient } from "@/data/query-client";
+import { useBrowserStore } from "@/desktop/browser/store";
 import { CHANGES_PREFERENCES_QUERY_KEY } from "@/hooks/use-changes-preferences/storage";
 import { APP_SETTINGS_QUERY_KEY } from "@/hooks/use-settings/storage";
 import { getHostRuntimeStore, HOST_REGISTRY_STORAGE_KEY } from "@/runtime/host-runtime";
-import { useBrowserStore } from "@/stores/browser-store";
 import { useDraftStore } from "@/stores/draft-store";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";

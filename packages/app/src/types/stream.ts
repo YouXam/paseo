@@ -88,6 +88,7 @@ export interface UserMessageItem {
   id: string;
   clientMessageId?: string;
   messageId?: string;
+  timelineCursor?: TimelinePosition;
   text: string;
   timestamp: Date;
   images?: UserMessageImageAttachment[];
@@ -98,6 +99,7 @@ export interface UserMessageInput {
   id?: string;
   clientMessageId?: string;
   messageId?: string;
+  timelineCursor?: TimelinePosition;
   text: string;
   timestamp: Date;
   images?: UserMessageImageAttachment[];
@@ -114,6 +116,7 @@ export function createUserMessage(input: UserMessageInput): UserMessageItem {
     id,
     ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
     ...(input.messageId ? { messageId: input.messageId } : {}),
+    ...(input.timelineCursor ? { timelineCursor: input.timelineCursor } : {}),
     text: input.text,
     timestamp: input.timestamp,
     ...(input.images && input.images.length > 0 ? { images: input.images } : {}),
@@ -121,6 +124,14 @@ export function createUserMessage(input: UserMessageInput): UserMessageItem {
       ? { attachments: input.attachments }
       : {}),
   };
+}
+
+export function isUnreconciledLocalUserMessage(message: UserMessageItem): boolean {
+  return (
+    message.clientMessageId !== undefined &&
+    message.messageId === undefined &&
+    message.timelineCursor === undefined
+  );
 }
 
 export function appendSubmittedUserMessage(input: {
@@ -150,7 +161,10 @@ export function removeSubmittedUserMessage(input: {
 }): { tail: StreamItem[]; head: StreamItem[] } {
   const remove = (items: StreamItem[]) => {
     const next = items.filter(
-      (item) => item.kind !== "user_message" || item.clientMessageId !== input.clientMessageId,
+      (item) =>
+        item.kind !== "user_message" ||
+        item.clientMessageId !== input.clientMessageId ||
+        !isUnreconciledLocalUserMessage(item),
     );
     return next.length === items.length ? items : next;
   };
@@ -236,11 +250,13 @@ function produceUserMessage(
     ...presentation,
     clientMessageId: incoming.clientMessageId ?? existing.clientMessageId,
     messageId: incoming.messageId ?? existing.messageId,
+    timelineCursor: incoming.timelineCursor ?? existing.timelineCursor,
   });
   if (
     existing.id === merged.id &&
     existing.clientMessageId === merged.clientMessageId &&
     existing.messageId === merged.messageId &&
+    existing.timelineCursor === merged.timelineCursor &&
     existing.text === merged.text &&
     existing.timestamp === merged.timestamp &&
     existing.images === merged.images &&
@@ -391,7 +407,8 @@ export interface CanonicalStreamReplacementInput {
   previousTail: StreamItem[];
   previousHead: StreamItem[];
   sendingClientMessageIds: readonly string[];
-  preserveLiveHead: boolean;
+  preserveContinuity: boolean;
+  canonicalCoverage: { epoch: string; endSeq: number | null };
 }
 
 export interface CanonicalStreamReplacementResult {
@@ -400,44 +417,173 @@ export interface CanonicalStreamReplacementResult {
   acknowledgedClientMessageIds: string[];
 }
 
+function isAfterCanonicalCoverage(
+  position: TimelinePosition,
+  coverage: CanonicalStreamReplacementInput["canonicalCoverage"],
+): boolean {
+  return (
+    position.epoch === coverage.epoch &&
+    (coverage.endSeq === null || position.seq > coverage.endSeq)
+  );
+}
+
 function removeUserMessageAt(items: UserMessageItem[], index: number): UserMessageItem[] {
   return [...items.slice(0, index), ...items.slice(index + 1)];
+}
+
+function mergeRetainedLifecycleItem(tail: StreamItem[], retained: StreamItem): StreamItem[] | null {
+  if (!retained.timelineCursor) {
+    return null;
+  }
+  if (isAgentToolCallItem(retained)) {
+    const tailIndex = findExistingAgentToolCallIndex(tail, retained.payload.data.callId);
+    const existing = tail[tailIndex];
+    if (tailIndex < 0 || !existing || !isAgentToolCallItem(existing)) {
+      return null;
+    }
+    const next = [...tail];
+    next[tailIndex] = mergeAgentToolCallItem(
+      existing,
+      retained.payload.data,
+      retained.timestamp,
+      retained.timelineCursor,
+    );
+    return next;
+  }
+  if (retained.kind === "todo_list") {
+    const tailIndex = tail.length - 1;
+    const existing = tail[tailIndex];
+    if (!existing || existing.kind !== "todo_list" || existing.provider !== retained.provider) {
+      return null;
+    }
+    const next = [...tail];
+    next[tailIndex] = {
+      ...existing,
+      timelineCursor: retained.timelineCursor,
+      timestamp: retained.timestamp,
+      items: retained.items,
+    };
+    return next;
+  }
+  if (retained.kind === "compaction" && retained.status === "completed") {
+    const tailIndex = tail.findIndex(
+      (item) => item.kind === "compaction" && item.status === "loading",
+    );
+    const existing = tail[tailIndex];
+    if (tailIndex < 0 || !existing || existing.kind !== "compaction") {
+      return null;
+    }
+    const next = [...tail];
+    next[tailIndex] = {
+      ...existing,
+      timelineCursor: retained.timelineCursor,
+      status: "completed",
+      trigger: retained.trigger ?? existing.trigger,
+      preTokens: retained.preTokens ?? existing.preTokens,
+    };
+    return next;
+  }
+  return null;
+}
+
+function reconcileReplacementHeadAgainstTail(
+  tail: StreamItem[],
+  retainedHead: StreamItem[],
+): { tail: StreamItem[]; head: StreamItem[] } {
+  let reconciledTail = tail;
+  const reconciledHeadIndexes = new Set<number>();
+  for (const [headIndex, item] of retainedHead.entries()) {
+    const nextTail = mergeRetainedLifecycleItem(reconciledTail, item);
+    if (!nextTail) {
+      continue;
+    }
+    reconciledTail = nextTail;
+    reconciledHeadIndexes.add(headIndex);
+  }
+
+  const tailIds = new Set(reconciledTail.map((item) => item.id));
+  return {
+    tail: reconciledTail,
+    head: retainedHead.filter(
+      (item, index) =>
+        !reconciledHeadIndexes.has(index) &&
+        (item.kind === "assistant_message" || !tailIds.has(item.id)),
+    ),
+  };
 }
 
 function preserveReplacementHead(
   tail: StreamItem[],
   currentHead: StreamItem[],
-  preserveLiveHead: boolean,
+  preserveContinuity: boolean,
   sendingClientMessageIds: ReadonlySet<string>,
+  canonicalCoverage: CanonicalStreamReplacementInput["canonicalCoverage"],
 ): CanonicalStreamReplacementResult {
-  const retainedHead = preserveLiveHead
-    ? currentHead
+  const canonicalTailAssistant = tail.at(-1);
+  const retainedHead = preserveContinuity
+    ? currentHead.filter(
+        (item) =>
+          !item.timelineCursor ||
+          isAfterCanonicalCoverage(item.timelineCursor, canonicalCoverage) ||
+          (item.kind === "assistant_message" &&
+            canonicalTailAssistant?.kind === "assistant_message" &&
+            item.text.startsWith(canonicalTailAssistant.text)),
+      )
     : currentHead.filter(
         (item) =>
           item.kind === "user_message" &&
           item.clientMessageId !== undefined &&
           sendingClientMessageIds.has(item.clientMessageId),
       );
-  const tailIds = new Set(tail.map((item) => item.id));
-  const unreconciledHead = retainedHead.filter(
-    (item) => item.kind === "assistant_message" || !tailIds.has(item.id),
+  const { tail: reconciledTail, head: unreconciledHead } = reconcileReplacementHeadAgainstTail(
+    tail,
+    retainedHead,
   );
-  const liveAssistantIndex = unreconciledHead.findLastIndex(
-    (item) => item.kind === "assistant_message",
-  );
+  const liveAssistantIndex = unreconciledHead[0]?.kind === "assistant_message" ? 0 : -1;
   if (liveAssistantIndex < 0) {
-    return { tail, head: unreconciledHead, acknowledgedClientMessageIds: [] };
+    return { tail: reconciledTail, head: unreconciledHead, acknowledgedClientMessageIds: [] };
   }
 
   const liveAssistant = unreconciledHead[liveAssistantIndex];
-  const tailAssistant = tail.at(-1);
+  const tailAssistant = reconciledTail.at(-1);
   if (
     liveAssistant.kind !== "assistant_message" ||
     !tailAssistant ||
-    tailAssistant.kind !== "assistant_message" ||
-    !liveAssistant.text.startsWith(tailAssistant.text)
+    tailAssistant.kind !== "assistant_message"
   ) {
-    return { tail, head: unreconciledHead, acknowledgedClientMessageIds: [] };
+    return { tail: reconciledTail, head: unreconciledHead, acknowledgedClientMessageIds: [] };
+  }
+
+  const hasNewerCursor =
+    liveAssistant.timelineCursor !== undefined &&
+    tailAssistant.timelineCursor !== undefined &&
+    liveAssistant.timelineCursor.epoch === tailAssistant.timelineCursor.epoch &&
+    liveAssistant.timelineCursor.seq > tailAssistant.timelineCursor.seq;
+  const hasMatchingProviderMessageId =
+    liveAssistant.messageId !== undefined && liveAssistant.messageId === tailAssistant.messageId;
+  const hasIdlessTextContinuation =
+    liveAssistant.messageId === undefined &&
+    tailAssistant.messageId === undefined &&
+    liveAssistant.text.startsWith(tailAssistant.text);
+  const isNewerContinuation =
+    hasNewerCursor && (hasMatchingProviderMessageId || hasIdlessTextContinuation);
+  if (isNewerContinuation) {
+    const text = liveAssistant.text.startsWith(tailAssistant.text)
+      ? liveAssistant.text
+      : `${tailAssistant.text}${liveAssistant.text}`;
+    const head = [
+      ...unreconciledHead.slice(0, liveAssistantIndex),
+      { ...liveAssistant, text },
+      ...unreconciledHead.slice(liveAssistantIndex + 1),
+    ];
+    return {
+      tail: reconciledTail.slice(0, -1),
+      head,
+      acknowledgedClientMessageIds: [],
+    };
+  }
+  if (!liveAssistant.text.startsWith(tailAssistant.text)) {
+    return { tail: reconciledTail, head: unreconciledHead, acknowledgedClientMessageIds: [] };
   }
 
   const head = [
@@ -445,7 +591,11 @@ function preserveReplacementHead(
     { ...liveAssistant, text: tailAssistant.text },
     ...unreconciledHead.slice(liveAssistantIndex + 1),
   ];
-  return { tail: tail.slice(0, -1), head, acknowledgedClientMessageIds: [] };
+  return {
+    tail: reconciledTail.slice(0, -1),
+    head,
+    acknowledgedClientMessageIds: [],
+  };
 }
 
 export function replaceWithCanonicalStream(
@@ -470,10 +620,7 @@ export function replaceWithCanonicalStream(
     if (tailResult.matched) {
       unmatchedTailMessages = removeUserMessageAt(unmatchedTailMessages, tailResult.index);
       nextTail.push(tailResult.message);
-      if (
-        tailResult.message.clientMessageId &&
-        sendingClientMessageIds.has(tailResult.message.clientMessageId)
-      ) {
+      if (tailResult.message.clientMessageId) {
         acknowledgedClientMessageIds.add(tailResult.message.clientMessageId);
       }
       continue;
@@ -486,10 +633,7 @@ export function replaceWithCanonicalStream(
         ...headResult.items.slice(headResult.index + 1),
       ];
       nextTail.push(headResult.message);
-      if (
-        headResult.message.clientMessageId &&
-        sendingClientMessageIds.has(headResult.message.clientMessageId)
-      ) {
+      if (headResult.message.clientMessageId) {
         acknowledgedClientMessageIds.add(headResult.message.clientMessageId);
       }
       continue;
@@ -498,23 +642,29 @@ export function replaceWithCanonicalStream(
     nextTail.push(item);
   }
 
+  const retainedTailMessages: UserMessageItem[] = [];
   for (const local of unmatchedTailMessages) {
-    if (!local.clientMessageId || !sendingClientMessageIds.has(local.clientMessageId)) {
-      continue;
+    const preserveLocal = input.preserveContinuity
+      ? isUnreconciledLocalUserMessage(local)
+      : local.clientMessageId !== undefined && sendingClientMessageIds.has(local.clientMessageId);
+    if (preserveLocal) {
+      nextTail.push(local);
+    } else if (
+      input.preserveContinuity &&
+      local.timelineCursor &&
+      isAfterCanonicalCoverage(local.timelineCursor, input.canonicalCoverage)
+    ) {
+      retainedTailMessages.push(local);
     }
-    nextTail.push(local);
   }
-
-  nextHead = nextHead.filter((item) => {
-    if (item.kind !== "user_message" || !item.clientMessageId) return true;
-    return sendingClientMessageIds.has(item.clientMessageId);
-  });
+  nextHead = [...retainedTailMessages, ...nextHead];
 
   const replacement = preserveReplacementHead(
     nextTail,
     nextHead,
-    input.preserveLiveHead,
+    input.preserveContinuity,
     sendingClientMessageIds,
+    input.canonicalCoverage,
   );
   return {
     ...replacement,
@@ -543,6 +693,7 @@ export type ThoughtStatus = "loading" | "ready";
 export interface ThoughtItem {
   kind: "thought";
   id: string;
+  timelineCursor?: TimelinePosition;
   text: string;
   timestamp: Date;
   status: ThoughtStatus;
@@ -577,6 +728,7 @@ export type ToolCallPayload =
 export interface ToolCallItem {
   kind: "tool_call";
   id: string;
+  timelineCursor?: TimelinePosition;
   timestamp: Date;
   payload: ToolCallPayload;
 }
@@ -594,6 +746,7 @@ type ActivityLogType = "system" | "info" | "success" | "error";
 export interface ActivityLogItem {
   kind: "activity_log";
   id: string;
+  timelineCursor?: TimelinePosition;
   timestamp: Date;
   activityType: ActivityLogType;
   message: string;
@@ -603,6 +756,7 @@ export interface ActivityLogItem {
 export interface CompactionItem {
   kind: "compaction";
   id: string;
+  timelineCursor?: TimelinePosition;
   timestamp: Date;
   status: "loading" | "completed";
   trigger?: "auto" | "manual";
@@ -617,6 +771,7 @@ export interface TodoEntry {
 export interface TodoListItem {
   kind: "todo_list";
   id: string;
+  timelineCursor?: TimelinePosition;
   timestamp: Date;
   provider: AgentProvider;
   items: TodoEntry[];
@@ -675,6 +830,7 @@ function appendUserMessage(
   _source: StreamUpdateSource,
   messageId?: string,
   clientMessageId?: string,
+  timelineCursor?: TimelinePosition,
 ): StreamItem[] {
   const { chunk, hasContent } = normalizeChunk(text);
   if (!hasContent) {
@@ -686,6 +842,7 @@ function appendUserMessage(
     id: messageId ?? createUniqueTimelineId(state, "user", chunkSeed, timestamp),
     clientMessageId,
     messageId,
+    timelineCursor,
     text: chunk,
     timestamp,
   });
@@ -756,7 +913,12 @@ function appendAssistantMessage(
   return [...state, item];
 }
 
-function appendThought(state: StreamItem[], text: string, timestamp: Date): StreamItem[] {
+function appendThought(
+  state: StreamItem[],
+  text: string,
+  timestamp: Date,
+  timelineCursor?: TimelinePosition,
+): StreamItem[] {
   const { chunk, hasContent } = normalizeChunk(text);
   if (!chunk) {
     return state;
@@ -766,6 +928,7 @@ function appendThought(state: StreamItem[], text: string, timestamp: Date): Stre
   if (last && last.kind === "thought") {
     const updated: ThoughtItem = {
       ...last,
+      ...(timelineCursor ? { timelineCursor } : {}),
       text: `${last.text}${chunk}`,
       timestamp,
       status: "loading",
@@ -781,6 +944,7 @@ function appendThought(state: StreamItem[], text: string, timestamp: Date): Stre
   const item: ThoughtItem = {
     kind: "thought",
     id: createUniqueTimelineId(state, "thought", idSeed, timestamp),
+    ...(timelineCursor ? { timelineCursor } : {}),
     text: chunk,
     timestamp,
     status: "loading",
@@ -916,6 +1080,7 @@ export function mergeAgentToolCallItem(
   existing: AgentToolCallItem,
   data: AgentToolCallData,
   timestamp: Date,
+  timelineCursor?: TimelinePosition,
 ): AgentToolCallItem {
   const mergedStatus = mergeAgentToolCallStatus(existing.payload.data.status, data.status);
   const mergedError =
@@ -927,6 +1092,7 @@ export function mergeAgentToolCallItem(
 
   return {
     ...existing,
+    ...(timelineCursor ? { timelineCursor } : {}),
     timestamp,
     payload: {
       source: "agent",
@@ -946,6 +1112,7 @@ function appendAgentToolCall(
   state: StreamItem[],
   data: AgentToolCallData,
   timestamp: Date,
+  timelineCursor?: TimelinePosition,
 ): StreamItem[] {
   const existingIndex = findExistingAgentToolCallIndex(state, data.callId);
 
@@ -954,7 +1121,7 @@ function appendAgentToolCall(
     if (!existing || !isAgentToolCallItem(existing)) {
       return state;
     }
-    const merged = mergeAgentToolCallItem(existing, data, timestamp);
+    const merged = mergeAgentToolCallItem(existing, data, timestamp, timelineCursor);
 
     if (
       merged.payload.data.provider === existing.payload.data.provider &&
@@ -963,7 +1130,8 @@ function appendAgentToolCall(
       merged.payload.data.status === existing.payload.data.status &&
       merged.payload.data.error === existing.payload.data.error &&
       merged.payload.data.detail === existing.payload.data.detail &&
-      merged.payload.data.metadata === existing.payload.data.metadata
+      merged.payload.data.metadata === existing.payload.data.metadata &&
+      merged.timelineCursor === existing.timelineCursor
     ) {
       return state;
     }
@@ -976,6 +1144,7 @@ function appendAgentToolCall(
   const item: ToolCallItem = {
     kind: "tool_call",
     id: `agent_tool_${data.callId}`,
+    ...(timelineCursor ? { timelineCursor } : {}),
     timestamp,
     payload: {
       source: "agent",
@@ -1004,6 +1173,7 @@ function appendTodoList(
   provider: AgentProvider,
   items: TodoEntry[],
   timestamp: Date,
+  timelineCursor?: TimelinePosition,
 ): StreamItem[] {
   const normalizedItems = items.map((item) => ({
     text: item.text,
@@ -1015,6 +1185,7 @@ function appendTodoList(
     const next = [...state];
     const updated: TodoListItem = {
       ...lastItem,
+      ...(timelineCursor ? { timelineCursor } : {}),
       items: normalizedItems,
       timestamp,
     };
@@ -1028,6 +1199,7 @@ function appendTodoList(
   const entry: TodoListItem = {
     kind: "todo_list",
     id: entryId,
+    ...(timelineCursor ? { timelineCursor } : {}),
     timestamp,
     provider,
     items: normalizedItems,
@@ -1044,6 +1216,7 @@ function reduceTimelineToolCall(
     { type: "tool_call" }
   >,
   timestamp: Date,
+  timelineCursor?: TimelinePosition,
 ): StreamItem[] {
   const normalizedToolName = item.name
     .trim()
@@ -1066,6 +1239,7 @@ function reduceTimelineToolCall(
       event.provider,
       tasks.map((entry) => ({ text: entry.text, completed: entry.completed })),
       timestamp,
+      timelineCursor,
     );
   }
 
@@ -1076,6 +1250,7 @@ function reduceTimelineToolCall(
       event.provider,
       tasks.map((entry) => ({ text: entry.text, completed: entry.completed })),
       timestamp,
+      timelineCursor,
     );
   }
 
@@ -1091,6 +1266,7 @@ function reduceTimelineToolCall(
       metadata: item.metadata,
     },
     timestamp,
+    timelineCursor,
   );
 }
 
@@ -1101,6 +1277,7 @@ function reduceTimelineCompaction(
     { type: "compaction" }
   >,
   timestamp: Date,
+  timelineCursor?: TimelinePosition,
 ): StreamItem[] {
   if (item.status === "completed") {
     const loadingIdx = state.findIndex((s) => s.kind === "compaction" && s.status === "loading");
@@ -1108,6 +1285,7 @@ function reduceTimelineCompaction(
     if (loadingIdx >= 0 && existing && existing.kind === "compaction") {
       const updated: CompactionItem = {
         ...existing,
+        ...(timelineCursor ? { timelineCursor } : {}),
         status: "completed",
         trigger: item.trigger ?? existing.trigger,
         preTokens: item.preTokens ?? existing.preTokens,
@@ -1121,6 +1299,7 @@ function reduceTimelineCompaction(
   const compaction: CompactionItem = {
     kind: "compaction",
     id: createTimelineId("compaction", item.status, timestamp),
+    ...(timelineCursor ? { timelineCursor } : {}),
     timestamp,
     status: item.status,
     trigger: item.trigger,
@@ -1148,6 +1327,7 @@ function reduceTimelineEvent(
           source,
           item.messageId,
           item.clientMessageId,
+          timelineCursor,
         ),
       );
     case "assistant_message":
@@ -1163,9 +1343,11 @@ function reduceTimelineEvent(
         ),
       );
     case "reasoning":
-      return appendThought(state, item.text, timestamp);
+      return appendThought(state, item.text, timestamp, timelineCursor);
     case "tool_call":
-      return finalizeActiveThoughts(reduceTimelineToolCall(state, event, item, timestamp));
+      return finalizeActiveThoughts(
+        reduceTimelineToolCall(state, event, item, timestamp, timelineCursor),
+      );
     case "todo": {
       if (event.provider === "claude") {
         return finalizeActiveThoughts(state);
@@ -1174,12 +1356,15 @@ function reduceTimelineEvent(
         text: todo.text,
         completed: todo.completed,
       }));
-      return finalizeActiveThoughts(appendTodoList(state, event.provider, items, timestamp));
+      return finalizeActiveThoughts(
+        appendTodoList(state, event.provider, items, timestamp, timelineCursor),
+      );
     }
     case "error": {
       const activity: ActivityLogItem = {
         kind: "activity_log",
         id: createTimelineId("error", item.message ?? "", timestamp),
+        ...(timelineCursor ? { timelineCursor } : {}),
         timestamp,
         activityType: "error",
         message: item.message ?? "Unknown error",
@@ -1187,7 +1372,9 @@ function reduceTimelineEvent(
       return finalizeActiveThoughts(appendActivityLog(state, activity));
     }
     case "compaction":
-      return finalizeActiveThoughts(reduceTimelineCompaction(state, item, timestamp));
+      return finalizeActiveThoughts(
+        reduceTimelineCompaction(state, item, timestamp, timelineCursor),
+      );
     default:
       return state;
   }
@@ -1236,7 +1423,7 @@ export function hydrateStreamState(
     timestamp: Date;
     timelineCursor?: TimelinePosition;
   }>,
-  options?: { source?: StreamUpdateSource },
+  options?: { source?: StreamUpdateSource; reservedItemIds?: ReadonlySet<string> },
 ): StreamItem[] {
   const hydrated = events.reduce<StreamItem[]>((state, { event, timestamp, timelineCursor }) => {
     return reduceStreamUpdate(state, event, timestamp, { ...options, timelineCursor });
@@ -1314,15 +1501,6 @@ function finalizeHeadItems(head: StreamItem[]): StreamItem[] {
     if (item.kind === "thought" && item.status !== "ready") {
       return markThoughtReady(item);
     }
-    if (item.kind === "assistant_message" && item.blockGroupId) {
-      return {
-        ...item,
-        id: createAssistantBlockId({
-          groupId: item.blockGroupId,
-          blockIndex: item.blockIndex ?? 0,
-        }),
-      };
-    }
     return item;
   });
 }
@@ -1395,22 +1573,23 @@ function promoteCompletedAssistantBlocks(params: { tail: StreamItem[]; head: Str
   const completedBlocks = blocks.slice(0, -1);
   const liveBlock = `${blocks[blocks.length - 1] ?? ""}${getTrailingNewlineSuffix(activeItem.text)}`;
   const promotedItems = completedBlocks.map<AssistantMessageItem>((block, offset) => ({
-    kind: "assistant_message",
+    ...activeItem,
     id: createAssistantBlockId({
       groupId: blockGroupId,
       blockIndex: firstBlockIndex + offset,
     }),
-    ...(activeItem.messageId ? { messageId: activeItem.messageId } : {}),
     blockGroupId,
     blockIndex: firstBlockIndex + offset,
     text: block,
-    timestamp: activeItem.timestamp,
   }));
 
   const nextTail = flushHeadToTail(params.tail, promotedItems);
   const liveItem: AssistantMessageItem = {
     ...activeItem,
-    id: `${blockGroupId}:head`,
+    id: createAssistantBlockId({
+      groupId: blockGroupId,
+      blockIndex: firstBlockIndex + completedBlocks.length,
+    }),
     blockGroupId,
     blockIndex: firstBlockIndex + completedBlocks.length,
     text: liveBlock,
@@ -1510,8 +1689,10 @@ function applyCanonicalUserMessageEvent(params: {
   head: StreamItem[];
   event: AgentStreamEventPayload;
   timestamp: Date;
+  timelineCursor?: TimelinePosition;
+  unmatchedInsert?: "tail" | "head";
 }): ApplyStreamEventResult | null {
-  const { tail, head, event, timestamp } = params;
+  const { tail, head, event, timestamp, timelineCursor, unmatchedInsert = "tail" } = params;
   if (event.type !== "timeline" || event.item.type !== "user_message") return null;
   const normalized = normalizeChunk(event.item.text);
 
@@ -1523,9 +1704,29 @@ function applyCanonicalUserMessageEvent(params: {
       createUniqueTimelineId([...tail, ...head], "user", normalized.chunk.trim(), timestamp),
     messageId: event.item.messageId,
     clientMessageId: event.item.clientMessageId,
+    timelineCursor,
     text: normalized.chunk,
     timestamp,
   });
+  if (unmatchedInsert === "head") {
+    const reconciled = upsertUserMessageAcrossStream({
+      tail,
+      head,
+      message: canonical,
+      insert: normalized.hasContent ? "head" : "none",
+      presentation: "existing",
+    });
+    return {
+      tail: reconciled.tail,
+      head: reconciled.head,
+      changedTail: reconciled.changedTail,
+      changedHead: reconciled.changedHead,
+      acknowledgedClientMessageIds:
+        reconciled.location?.matched && reconciled.location.message.clientMessageId
+          ? [reconciled.location.message.clientMessageId]
+          : [],
+    };
+  }
   const reconciled = placeCanonicalUserMessageAtTail(flushedTail, canonical, normalized.hasContent);
   return {
     tail: reconciled.items,
@@ -1557,9 +1758,17 @@ export function applyStreamEvent(params: {
   timestamp: Date;
   source?: StreamUpdateSource;
   timelineCursor?: TimelinePosition;
+  unmatchedUserMessageInsert?: "tail" | "head";
 }): ApplyStreamEventResult {
   const { tail, head, event, timestamp } = params;
-  const canonicalUserResult = applyCanonicalUserMessageEvent({ tail, head, event, timestamp });
+  const canonicalUserResult = applyCanonicalUserMessageEvent({
+    tail,
+    head,
+    event,
+    timestamp,
+    timelineCursor: params.timelineCursor,
+    unmatchedInsert: params.unmatchedUserMessageInsert,
+  });
   if (canonicalUserResult) return canonicalUserResult;
   const source = params.source ?? "live";
   let nextTail = tail;

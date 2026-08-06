@@ -4,20 +4,14 @@ import {
   beginMessageSubmission,
   getActiveMessageSubmissions,
   getSendingClientMessageIds,
-  observeAcceptedMessageSubmissionsRunning,
   observeMessageSubmissionCanonical,
   rejectMessageSubmission,
 } from "./model";
 
-const submittedAt = new Date("2026-07-26T10:00:00.000Z");
-
 describe("message submission transactions", () => {
   it("tracks every in-flight submission independently", () => {
-    const first = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
-    const both = beginMessageSubmission(first, {
-      clientMessageId: "client-2",
-      submittedAt: new Date(submittedAt.getTime() + 1),
-    });
+    const first = beginMessageSubmission([], { clientMessageId: "client-1" });
+    const both = beginMessageSubmission(first, { clientMessageId: "client-2" });
 
     expect(getActiveMessageSubmissions(both).map((item) => item.clientMessageId)).toEqual([
       "client-1",
@@ -26,76 +20,63 @@ describe("message submission transactions", () => {
     expect(getSendingClientMessageIds(both)).toEqual(["client-1", "client-2"]);
   });
 
-  it("removes only the RPC-accepted transaction", () => {
+  it("settles only the accepted transaction on RPC acceptance", () => {
     const both = beginMessageSubmission(
-      beginMessageSubmission([], { clientMessageId: "client-1", submittedAt }),
-      { clientMessageId: "client-2", submittedAt },
+      beginMessageSubmission([], { clientMessageId: "client-1" }),
+      { clientMessageId: "client-2" },
     );
+    const acknowledged = observeMessageSubmissionCanonical(both, ["client-1"]);
 
-    expect(acceptMessageSubmission(both, "client-1", true, false)).toEqual([
+    expect(acceptMessageSubmission(acknowledged, "client-1")).toEqual([
       {
         clientMessageId: "client-2",
-        submittedAt,
-        rpcAccepted: false,
         providerAcknowledged: false,
+        rpcSettled: false,
       },
     ]);
   });
 
-  it("bridges an accepted RPC until the correlated running state is observed", () => {
-    const sending = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
-    const accepted = acceptMessageSubmission(sending, "client-1", false, false);
+  it("keeps activity until an accepted RPC's canonical row is observed", () => {
+    const sending = beginMessageSubmission([], { clientMessageId: "client-1" });
+    const accepted = acceptMessageSubmission(sending, "client-1");
 
-    expect(getActiveMessageSubmissions(accepted)).toHaveLength(1);
-    expect(accepted[0].rpcAccepted).toBe(true);
-    expect(observeAcceptedMessageSubmissionsRunning(accepted)).toEqual([]);
-  });
-
-  it("settles an accepted RPC when provider acknowledgement arrives after running was missed", () => {
-    const sending = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
-    const accepted = acceptMessageSubmission(sending, "client-1", false, false);
-
+    expect(accepted).toEqual([
+      {
+        clientMessageId: "client-1",
+        providerAcknowledged: false,
+        rpcSettled: true,
+      },
+    ]);
+    expect(getActiveMessageSubmissions(accepted).map((item) => item.clientMessageId)).toEqual([
+      "client-1",
+    ]);
     expect(observeMessageSubmissionCanonical(accepted, ["client-1"])).toEqual([]);
-  });
-
-  it("settles an explicitly out-of-band acceptance without lifecycle inference", () => {
-    const sending = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
-
-    expect(acceptMessageSubmission(sending, "client-1", false, true)).toEqual([]);
-  });
-
-  it("settles an idle acceptance from a daemon without submission disposition", () => {
-    const sending = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
-
-    expect(acceptMessageSubmission(sending, "client-1", false, undefined)).toEqual([]);
   });
 
   it("records provider acknowledgement without settling another transaction", () => {
     const both = beginMessageSubmission(
-      beginMessageSubmission([], { clientMessageId: "client-1", submittedAt }),
-      { clientMessageId: "client-2", submittedAt },
+      beginMessageSubmission([], { clientMessageId: "client-1" }),
+      { clientMessageId: "client-2" },
     );
     const observed = observeMessageSubmissionCanonical(both, ["client-1"]);
 
     expect(observed).toEqual([
       {
         clientMessageId: "client-1",
-        submittedAt,
-        rpcAccepted: false,
         providerAcknowledged: true,
+        rpcSettled: false,
       },
       {
         clientMessageId: "client-2",
-        submittedAt,
-        rpcAccepted: false,
         providerAcknowledged: false,
+        rpcSettled: false,
       },
     ]);
     expect(getSendingClientMessageIds(observed)).toEqual(["client-2"]);
   });
 
   it("does not roll back a provider-acknowledged prompt on a later transport error", () => {
-    const sending = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
+    const sending = beginMessageSubmission([], { clientMessageId: "client-1" });
     const observed = observeMessageSubmissionCanonical(sending, ["client-1"]);
 
     expect(rejectMessageSubmission(observed, "client-1")).toEqual({
@@ -105,7 +86,7 @@ describe("message submission transactions", () => {
   });
 
   it("rejects an unacknowledged transaction", () => {
-    const sending = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
+    const sending = beginMessageSubmission([], { clientMessageId: "client-1" });
 
     expect(rejectMessageSubmission(sending, "client-1")).toEqual({
       outcome: "rejected",
@@ -114,10 +95,10 @@ describe("message submission transactions", () => {
   });
 
   it("does not create duplicate transaction identity", () => {
-    const sending = beginMessageSubmission([], { clientMessageId: "client-1", submittedAt });
+    const sending = beginMessageSubmission([], { clientMessageId: "client-1" });
 
-    expect(() =>
-      beginMessageSubmission(sending, { clientMessageId: "client-1", submittedAt }),
-    ).toThrow("Message submission already exists");
+    expect(() => beginMessageSubmission(sending, { clientMessageId: "client-1" })).toThrow(
+      "Message submission already exists",
+    );
   });
 });

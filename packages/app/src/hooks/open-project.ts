@@ -5,9 +5,9 @@ import type {
   WorkspaceProjectDescriptorPayload,
 } from "@getpaseo/protocol/messages";
 import {
-  normalizeEmptyProjectDescriptor as normalizeProjectWithoutWorkspacesDescriptor,
+  normalizeProjectDescriptor,
   normalizeWorkspaceDescriptor,
-  type EmptyProjectDescriptor as ProjectWithoutWorkspacesDescriptor,
+  type ProjectDescriptor,
   type WorkspaceDescriptor,
 } from "@/stores/session-store";
 
@@ -16,9 +16,9 @@ type OpenProjectErrorCode = NonNullable<OpenProjectPayload["errorCode"]>;
 
 export interface OpenProjectSuccess {
   ok: true;
-  /** Set when the path was opened directly as an existing git worktree workspace. */
+  /** Set when an existing git worktree was opened directly as a workspace. */
   workspaceId: string | null;
-  /** Set when a project descriptor was registered (add / clone flows). */
+  /** Set when an add or clone flow registered a project descriptor. */
   project: WorkspaceProjectDescriptorPayload | null;
 }
 
@@ -52,29 +52,29 @@ export interface OpenProjectDirectlyInput {
   isConnected: boolean;
   canAddProject: boolean;
   client: Pick<DaemonClient, "addProject" | "createWorkspace" | "getCheckoutStatus"> | null;
-  addEmptyProject: (serverId: string, project: ProjectWithoutWorkspacesDescriptor) => void;
-  mergeWorkspaces: (serverId: string, workspaces: WorkspaceDescriptor[]) => void;
+  mergeWorkspaces: (serverId: string, workspaces: Iterable<WorkspaceDescriptor>) => void;
+  upsertProject: (serverId: string, project: ProjectDescriptor) => void;
   setHasHydratedWorkspaces: (serverId: string, hydrated: boolean) => void;
 }
 
 interface ProjectRegistrationCallbacks {
   serverId: string;
   isConnected: boolean;
-  addEmptyProject: (serverId: string, project: ProjectWithoutWorkspacesDescriptor) => void;
+  upsertProject: (serverId: string, project: ProjectDescriptor) => void;
   setHasHydratedWorkspaces: (serverId: string, hydrated: boolean) => void;
 }
 
 export interface RegisterProjectDescriptorInput {
   serverId: string;
   project: WorkspaceProjectDescriptorPayload;
-  addEmptyProject: (serverId: string, project: ProjectWithoutWorkspacesDescriptor) => void;
+  upsertProject: (serverId: string, project: ProjectDescriptor) => void;
   setHasHydratedWorkspaces: (serverId: string, hydrated: boolean) => void;
 }
 
 export function registerProjectDescriptor(input: RegisterProjectDescriptorInput): boolean {
   const serverId = input.serverId.trim();
   if (!serverId) return false;
-  input.addEmptyProject(serverId, normalizeProjectWithoutWorkspacesDescriptor(input.project));
+  input.upsertProject(serverId, normalizeProjectDescriptor(input.project));
   input.setHasHydratedWorkspaces(serverId, true);
   return true;
 }
@@ -124,11 +124,7 @@ export async function openProjectDirectly(
       source: { kind: "directory", path: trimmedPath },
     });
     if (payload.error || !payload.workspace) {
-      return {
-        ok: false,
-        errorCode: null,
-        error: payload.error,
-      };
+      return { ok: false, errorCode: null, error: payload.error };
     }
     const workspace = normalizeWorkspaceDescriptor(payload.workspace);
     input.mergeWorkspaces(normalizedServerId, [workspace]);
@@ -148,7 +144,7 @@ export async function openProjectDirectly(
   const registered = registerProjectDescriptor({
     serverId: normalizedServerId,
     project: payload.project,
-    addEmptyProject: input.addEmptyProject,
+    upsertProject: input.upsertProject,
     setHasHydratedWorkspaces: input.setHasHydratedWorkspaces,
   });
   return registered
@@ -184,7 +180,7 @@ export async function cloneGithubProjectDirectly(
   const registered = registerProjectDescriptor({
     serverId: normalizedServerId,
     project: payload.project,
-    addEmptyProject: input.addEmptyProject,
+    upsertProject: input.upsertProject,
     setHasHydratedWorkspaces: input.setHasHydratedWorkspaces,
   });
   return registered

@@ -26,7 +26,8 @@ describe("deriveStreamTurnTiming", () => {
     const submittedAt = new Date("2026-05-15T00:00:00.000Z");
 
     const timing = deriveStreamTurnTiming({
-      agentStatus: "running",
+      isTurnActive: true,
+      activeTurnStartedAt: submittedAt,
       tail: [],
       head: [user("submitted", submittedAt)],
     });
@@ -39,7 +40,8 @@ describe("deriveStreamTurnTiming", () => {
     const secondUserAt = new Date("2026-05-15T00:01:00.000Z");
 
     const timing = deriveStreamTurnTiming({
-      agentStatus: "running",
+      isTurnActive: true,
+      activeTurnStartedAt: secondUserAt,
       tail: [
         user("u1", firstUserAt),
         assistant("a1", new Date("2026-05-15T00:00:05.000Z")),
@@ -57,7 +59,8 @@ describe("deriveStreamTurnTiming", () => {
     const assistantAt = new Date("2026-05-15T00:00:07.000Z");
 
     const timing = deriveStreamTurnTiming({
-      agentStatus: "idle",
+      isTurnActive: false,
+      activeTurnStartedAt: null,
       tail: [
         user("u1", userAt),
         assistant("a1", assistantAt),
@@ -79,7 +82,8 @@ describe("deriveStreamTurnTiming", () => {
     const lastAssistantAt = new Date("2026-05-15T00:00:07.000Z");
 
     const timing = deriveStreamTurnTiming({
-      agentStatus: "idle",
+      isTurnActive: false,
+      activeTurnStartedAt: null,
       tail: [
         user("u1", userAt),
         assistant("a1", firstAssistantAt),

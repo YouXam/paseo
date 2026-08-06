@@ -9,9 +9,7 @@ import type {
   CheckoutCommitFileDiffRequest,
   CheckoutRefreshRequest,
   CheckoutRenameBranchRequest,
-  CheckoutStageFileRequest,
   CheckoutStatusRequest,
-  CheckoutUnstageFileRequest,
   SessionInboundMessage,
   SessionOutboundMessage,
   SubscribeCheckoutDiffRequest,
@@ -19,7 +17,6 @@ import type {
   ValidateBranchRequest,
 } from "../../messages.js";
 import type {
-  CheckoutDiffCompareInput,
   CheckoutDiffSnapshotPayload,
   CheckoutDiffSubscription,
   CheckoutDiffSubscriptionRequest,
@@ -51,12 +48,10 @@ import {
   mergeToBase,
   pullCurrentBranch,
   pushCurrentBranch,
-  stageFile,
-  unstageFile,
   listCheckoutCommits,
   getCommitFileDiff,
 } from "../../../utils/checkout-git.js";
-import { execCommand } from "../../../utils/spawn.js";
+import { runGitCommand } from "../../../utils/run-git-command.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
 
@@ -126,7 +121,6 @@ export interface CheckoutSessionOptions {
   github: ForgeService;
   checkoutDiffManager: CheckoutDiffSubscriber;
   gitMetadataGenerator: GitMetadataGenerator;
-  supportsCheckoutDiffChangeSources?: () => boolean;
   paseoHome: string;
   worktreesRoot: string | undefined;
   logger: pino.Logger;
@@ -154,7 +148,6 @@ export class CheckoutSession {
   private readonly github: ForgeService;
   private readonly checkoutDiffManager: CheckoutDiffSubscriber;
   private readonly gitMetadataGenerator: GitMetadataGenerator;
-  private readonly supportsCheckoutDiffChangeSources: () => boolean;
   private readonly paseoHome: string;
   private readonly worktreesRoot: string | undefined;
   private readonly logger: pino.Logger;
@@ -167,8 +160,6 @@ export class CheckoutSession {
     this.github = options.github;
     this.checkoutDiffManager = options.checkoutDiffManager;
     this.gitMetadataGenerator = options.gitMetadataGenerator;
-    this.supportsCheckoutDiffChangeSources =
-      options.supportsCheckoutDiffChangeSources ?? (() => false);
     this.paseoHome = options.paseoHome;
     this.worktreesRoot = options.worktreesRoot;
     this.logger = options.logger;
@@ -409,10 +400,6 @@ export class CheckoutSession {
 
   async handleSubscribeDiffRequest(msg: SubscribeCheckoutDiffRequest): Promise<void> {
     const cwd = expandTilde(msg.cwd);
-    const compare: CheckoutDiffCompareInput = {
-      ...msg.compare,
-      ...(this.supportsCheckoutDiffChangeSources() ? { includeChangeSources: true } : {}),
-    };
     this.diffSubscriptions.get(msg.subscriptionId)?.();
     const abort = new AbortController();
     const unsubscribe = () => abort.abort();
@@ -420,7 +407,7 @@ export class CheckoutSession {
 
     try {
       const subscription = await this.checkoutDiffManager.subscribe(
-        { cwd, compare, signal: abort.signal },
+        { cwd, compare: msg.compare, signal: abort.signal },
         (snapshot) => {
           this.host.emit({
             type: "checkout_diff_update",
@@ -589,7 +576,6 @@ export class CheckoutSession {
       // Branch is a git fact derived per-descriptor from each workspace's own
       // live git snapshot (id → cwd); the reconciliation pass re-persists the
       // `branch` field per workspace from its own cwd. No cwd → ids fan-out here.
-      // TODO(K10): PR-binding on branch rename is deferred — see plan K10.
 
       // Push a workspace_update immediately so the sidebar/header reflect
       // the new branch name without waiting for the background git watcher.
@@ -628,8 +614,9 @@ export class CheckoutSession {
       const message = branchLabel
         ? `${CheckoutSession.PASEO_STASH_PREFIX} ${branchLabel}`
         : `${CheckoutSession.PASEO_STASH_PREFIX} unnamed`;
-      await execCommand("git", ["stash", "push", "--include-untracked", "-m", message], {
+      await runGitCommand(["stash", "push", "--include-untracked", "-m", message], {
         cwd,
+        timeout: 120_000,
       });
       await this.gitMutation.notifyGitMutation(cwd, "stash-push");
       this.scheduleDiffRefresh(cwd);
@@ -650,8 +637,9 @@ export class CheckoutSession {
   ): Promise<void> {
     const { cwd, stashIndex, requestId } = msg;
     try {
-      await execCommand("git", ["stash", "pop", `stash@{${stashIndex}}`], {
+      await runGitCommand(["stash", "pop", `stash@{${stashIndex}}`], {
         cwd,
+        timeout: 120_000,
       });
       await this.gitMutation.notifyGitMutation(cwd, "stash-pop");
       this.scheduleDiffRefresh(cwd);
@@ -887,70 +875,6 @@ export class CheckoutSession {
         type: "checkout_push_response",
         payload: {
           cwd,
-          success: false,
-          error: toCheckoutError(error),
-          requestId,
-        },
-      });
-    }
-  }
-
-  async handleCheckoutStageFileRequest(msg: CheckoutStageFileRequest): Promise<void> {
-    const { cwd, path, requestId } = msg;
-
-    try {
-      await stageFile(cwd, path);
-      await this.gitMutation.notifyGitMutation(cwd, "stage-file");
-      this.scheduleDiffRefresh(cwd);
-
-      this.host.emit({
-        type: "checkout.stage_file.response",
-        payload: {
-          cwd,
-          path,
-          success: true,
-          error: null,
-          requestId,
-        },
-      });
-    } catch (error) {
-      this.host.emit({
-        type: "checkout.stage_file.response",
-        payload: {
-          cwd,
-          path,
-          success: false,
-          error: toCheckoutError(error),
-          requestId,
-        },
-      });
-    }
-  }
-
-  async handleCheckoutUnstageFileRequest(msg: CheckoutUnstageFileRequest): Promise<void> {
-    const { cwd, path, requestId } = msg;
-
-    try {
-      await unstageFile(cwd, path);
-      await this.gitMutation.notifyGitMutation(cwd, "unstage-file");
-      this.scheduleDiffRefresh(cwd);
-
-      this.host.emit({
-        type: "checkout.unstage_file.response",
-        payload: {
-          cwd,
-          path,
-          success: true,
-          error: null,
-          requestId,
-        },
-      });
-    } catch (error) {
-      this.host.emit({
-        type: "checkout.unstage_file.response",
-        payload: {
-          cwd,
-          path,
           success: false,
           error: toCheckoutError(error),
           requestId,

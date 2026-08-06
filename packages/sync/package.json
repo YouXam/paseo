@@ -1,6 +1,6 @@
 {
   "name": "@getpaseo/sync",
-  "version": "0.1.104",
+  "version": "0.3.0-beta.2",
   "description": "Paseo encrypted UI state sync worker",
   "files": [
     "dist",

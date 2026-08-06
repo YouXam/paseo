@@ -84,17 +84,54 @@ function applyAgentStatus(input: {
   agentId: string;
   status: AgentSnapshotPayload["status"];
   updatedAt: string;
+  lastUserMessageAt?: string;
 }): void {
   const agent = createAgentPayload({
     id: input.agentId,
     status: input.status,
     updatedAt: input.updatedAt,
+    lastUserMessageAt: input.lastUserMessageAt ?? null,
   });
   applyAgentDirectoryDelta({
     serverId: input.serverId,
     delta: { kind: "upsert", agent, project: createEntry(agent).project },
   });
 }
+
+describe("turn liveness authority", () => {
+  it("normalizes old-daemon status into the shared activity replica", () => {
+    const serverId = "server-turn-liveness";
+    const agentId = "agent-1";
+    const startedAt = "2026-07-27T10:00:01.000Z";
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, null as unknown as DaemonClient);
+    applyAgentStatus({ serverId, agentId, status: "idle", updatedAt: startedAt });
+
+    applyAgentStatus({
+      serverId,
+      agentId,
+      status: "running",
+      updatedAt: "2026-07-27T10:00:02.000Z",
+      lastUserMessageAt: startedAt,
+    });
+    expect(store.getSession(serverId)?.agentTurnLiveness.get(agentId)).toEqual({
+      phase: "open",
+      turnId: null,
+      startedAt: new Date(startedAt),
+      cancellationRequestId: null,
+    });
+
+    applyAgentStatus({
+      serverId,
+      agentId,
+      status: "idle",
+      updatedAt: "2026-07-27T10:00:03.000Z",
+    });
+
+    expect(store.getSession(serverId)?.agentTurnLiveness.has(agentId)).toBe(false);
+    store.clearSession(serverId);
+  });
+});
 
 describe("message submission authority", () => {
   it("does not settle a submission from an unrelated running transition", () => {
@@ -120,9 +157,8 @@ describe("message submission authority", () => {
     expect(useSessionStore.getState().sessions[serverId]?.messageSubmissions.get(agentId)).toEqual([
       {
         clientMessageId,
-        submittedAt: new Date("2026-07-27T10:00:00.000Z"),
-        rpcAccepted: false,
         providerAcknowledged: false,
+        rpcSettled: false,
       },
     ]);
     store.clearSession(serverId);

@@ -19,7 +19,24 @@ Root checkout dev is intentionally split across terminals:
 - `npm run dev:app` runs Expo on `http://localhost:8081` and connects to the dev daemon.
 - `npm run dev:desktop` runs its own Electron-flavored Expo server on the first free port from `8082` through `8089`. It never claims port `8081`.
 
+Desktop dev launches its desktop-managed daemon with `PASEO_NODE_ENV=development`,
+so development-only providers such as Mock Load Test are available. Packaged
+desktop launches always force the daemon to production mode.
+
 `npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
+
+## Nix desktop package
+
+The flake exposes `packages.<system>.desktop` on Linux and macOS:
+
+```bash
+nix build .#desktop
+```
+
+Linux produces the `paseo-desktop` launcher and desktop entry. macOS produces
+`Applications/Paseo.app` plus the `paseo-desktop` launcher. Both use the nixpkgs
+Electron runtime and the checkout's built daemon, client, and renderer rather
+than downloading a published desktop release.
 
 ### PASEO_HOME
 
@@ -29,7 +46,6 @@ Root checkout dev is intentionally split across terminals:
 - **Repo dev scripts** default to `$ROOT/.dev/paseo-home`, where `$ROOT` is the current checkout or worktree root. This keeps all dev state scoped to the checkout instead of the packaged desktop app.
 - **`npm run cli -- ...`** runs through the same dev-home wrapper as the dev scripts, so the in-repo CLI automatically targets the current checkout's `.dev/paseo-home` and configured dev daemon endpoint.
 - **Paseo-created worktrees** seed `$PASEO_WORKTREE_PATH/.dev/paseo-home` from `$PASEO_SOURCE_CHECKOUT_PATH/.dev/paseo-home` by copying durable JSON metadata. Runtime files like pid files, sockets, and logs are not copied.
-- **Paseo-created worktrees** read `.worktreeinclude` from the live source checkout before creation. Bare paths and `copy <path>` copy a snapshot into the new worktree; `symlink <path>` creates a live source link. Missing paths, malformed entries, unsafe paths, incompatible include overlaps, destination conflicts, unavailable platform links, and ordinary read/write failures are skipped individually and reported in the daemon log, so the rest of the plan still runs. A source symlink is allowed only when its resolved target remains inside the active source checkout. If that checkout is itself Paseo-managed, its own paths remain eligible while other managed worktree paths stay protected; `copy` snapshots that resolved target, while `symlink` links directly to it. Hard links are ordinary files. Each include is staged before it is committed; Paseo aborts creation only if it cannot safely clean up partial materialization state (or Git/worktree setup itself fails). Materialization finishes before `worktree.setup` runs.
 - **This repo's worktree setup** also best-effort seeds `packages/app/ios` and the newest `.dev/ios-build` entry from the source checkout so iOS simulator services can reuse native project and Xcode cache state when it is safe enough to do so.
 
 Override knobs:
@@ -99,10 +115,21 @@ The iOS simulator shares the Mac's loopback, so `localhost:<port>` reaches the h
 
 ### Desktop renderer profiling
 
-`npm run dev:desktop` starts Electron with Chromium remote debugging enabled on
-`http://127.0.0.1:9223` so renderer CPU profiles can be captured through CDP.
-It launches its own Electron-flavored Expo server and passes that URL to Electron.
-Override the CDP port with `PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` when `9223` is busy.
+`npm run dev:desktop` starts Electron with Chromium remote debugging enabled so
+renderer CPU profiles can be captured through CDP. By default it passes
+`--remote-debugging-port=0`, so Chromium atomically asks the OS for an available
+port and prints the selected DevTools endpoint. Set
+`PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` when a QA workflow requires a validated,
+fixed port.
+
+Desktop dev also scopes Electron `userData` to the current dev root. This prevents
+desktop-only environment inherited by terminals opened inside Paseo from coupling
+a new worktree instance to the parent desktop instance's profile or single-instance
+lock.
+
+Electron remains in the desktop dev runner's process group. Closing or stopping the
+workspace-script terminal must terminate Electron with Metro; detaching Electron
+leaves an orphan holding the worktree's single-instance lock and broken output pipes.
 
 With desktop dev running, verify the real BrowserWindow, titlebar clearance, fullscreen
 transition, and 751-pixel settings split with:
@@ -112,8 +139,9 @@ npm run verify:electron-cdp --workspace=@getpaseo/desktop
 ```
 
 The verifier reads the same `EXPO_PORT` and
-`PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` environment names as desktop dev. Set both when
-testing an isolated instance on non-default ports.
+`PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` environment names as desktop dev. Set an
+explicit remote-debugging port for verifier runs, and set both when testing an
+isolated instance on non-default ports.
 
 When running a dedicated Electron QA instance against a non-default Expo port, set
 `EXPO_DEV_URL` explicitly. Desktop main defaults to `http://localhost:8081`, so
@@ -216,6 +244,27 @@ The supervisor rotates `daemon.log`. Persisted `log.file.rotate` settings in
 `PASEO_LOG_ROTATE_SIZE` and `PASEO_LOG_ROTATE_COUNT` env vars override the
 defaults. The default rotation is `10m` x `3` files everywhere.
 
+### Git process pressure
+
+If Git refreshes consume too much CPU, disk, or antivirus capacity, especially on Windows, reduce
+the daemon-global Git process limits in `$PASEO_HOME/config.json`:
+
+```json
+{
+  "daemon": {
+    "git": {
+      "maxProcessesPerSecond": 5,
+      "maxProcessConcurrency": 4
+    }
+  }
+}
+```
+
+Restart the daemon with `paseo daemon restart`. If Paseo Desktop manages the daemon, fully quit and
+reopen the desktop app. Lower values reduce machine pressure but make Git-backed workspace state and
+Git RPCs wait longer. See [Git process limits](data-model.md#git-process-limits) for defaults,
+semantics, and environment-variable overrides.
+
 ### Agent Tool Catalog Measurement
 
 Measure the MCP `tools/list` payload that Paseo injects into agents with:
@@ -228,6 +277,21 @@ The command reports compact JSON bytes, estimated tokens, field totals, largest
 tools, and the browser-tools delta. It defaults to the agent-scoped catalog; use
 `-- --scope=top-level` for the unaffiliated `/mcp/agents` shape and `-- --json`
 for machine-readable output.
+
+## Worktree starting refs
+
+A new worktree starts from the current branch's upstream, or the local branch when it has no
+upstream. This keeps unpushed local commits out of new workspaces by default. The picker collapses
+identical refs; divergent local or non-origin refs remain explicit, qualified choices.
+
+The daemon sends the exact upstream ref because the remote and branch names cannot be inferred.
+Worktrees retain that ref for comparisons and updates from base while exposing its branch name to
+the UI. Merging into base requires a mutable local target: `origin/main` maps to local `main`, while
+another remote fails closed until the worktree records an explicit local target. Older daemons omit
+the optional field and retain the previous local-first behavior; older worktree metadata without the
+exact ref also resolves through its stored branch name.
+
+Worktrees inherit committed Git state only; uncommitted source-checkout changes are not copied.
 
 ## paseo.json service scripts
 

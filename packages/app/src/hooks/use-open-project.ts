@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
-import { useSessionStore } from "@/stores/session-store";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
+import { useSessionStore } from "@/stores/session-store";
 import {
   cloneGithubProjectDirectly,
   openProjectDirectly,
@@ -21,8 +21,8 @@ export function useOpenProject(
         state.sessions[normalizedServerId]?.serverInfo?.features?.stableProjectIdentity === true
       : false,
   );
-  const addEmptyProject = useSessionStore((state) => state.addEmptyProject);
   const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
+  const upsertProject = useSessionStore((state) => state.upsertProject);
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -33,8 +33,8 @@ export function useOpenProject(
         isConnected,
         canAddProject,
         client,
-        addEmptyProject,
         mergeWorkspaces,
+        upsertProject,
         setHasHydratedWorkspaces,
       });
       if (result.ok && result.workspaceId) {
@@ -46,7 +46,7 @@ export function useOpenProject(
       return result;
     },
     [
-      addEmptyProject,
+      upsertProject,
       canAddProject,
       client,
       isConnected,
@@ -67,7 +67,7 @@ export function useCloneGithubProject(
   const normalizedServerId = serverId?.trim() ?? "";
   const client = useHostRuntimeClient(normalizedServerId);
   const isConnected = useHostRuntimeIsConnected(normalizedServerId);
-  const addEmptyProject = useSessionStore((state) => state.addEmptyProject);
+  const upsertProject = useSessionStore((state) => state.upsertProject);
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -79,10 +79,10 @@ export function useCloneGithubProject(
         ...(cloneProtocol ? { cloneProtocol } : {}),
         isConnected,
         client,
-        addEmptyProject,
+        upsertProject,
         setHasHydratedWorkspaces,
       });
     },
-    [addEmptyProject, client, isConnected, normalizedServerId, setHasHydratedWorkspaces],
+    [client, isConnected, normalizedServerId, setHasHydratedWorkspaces, upsertProject],
   );
 }
