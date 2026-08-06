@@ -1,0 +1,84 @@
+name: Fork Daemon Release Tarballs
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach daemon tarballs to, e.g. v0.1.107"
+        required: true
+        type: string
+
+concurrency:
+  group: fork-daemon-release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+  ONNXRUNTIME_NODE_INSTALL: skip
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  daemon-tarballs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Build daemon packages
+        run: npm run build:server
+
+      - name: Pack daemon npm tarballs
+        run: |
+          set -euo pipefail
+          mkdir -p .release-assets
+          node scripts/build-daemon-release-assets.mjs --tag "$RELEASE_TAG" --out .release-assets
+          node scripts/create-daemon-release-installer.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --bundle "paseo-daemon-npm-tarballs-$RELEASE_TAG.tgz" \
+            --out .release-assets/install-paseo-daemon.sh
+
+      - name: Smoke install tarballs into temporary prefix
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/paseo-daemon-install"
+          tarballs=(
+            .release-assets/packages/getpaseo-highlight-*.tgz
+            .release-assets/packages/getpaseo-relay-*.tgz
+            .release-assets/packages/getpaseo-protocol-*.tgz
+            .release-assets/packages/getpaseo-client-*.tgz
+            .release-assets/packages/getpaseo-server-*.tgz
+            .release-assets/packages/getpaseo-cli-*.tgz
+          )
+          npm install --global --prefix "$prefix" "${tarballs[@]}"
+          "$prefix/bin/paseo" --version
+
+      - name: Upload daemon release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            ".release-assets/paseo-daemon-npm-tarballs-$RELEASE_TAG.tgz" \
+            ".release-assets/install-paseo-daemon.sh" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Add install command to release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/update-daemon-release-install-notes.mjs --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"

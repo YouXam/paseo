@@ -98,3 +98,45 @@ test("converts contributor profile links to mentions in synced release notes", (
     assert.doesNotMatch(syncedNotes, /\[@therainisme\]\(https:\/\/github\.com\/therainisme\)/);
   }, changelogText);
 });
+
+test("preserves the fork daemon install block when syncing release notes", () => {
+  withTempChangelog(() => {
+    let syncedNotes = "";
+    const installBlock = [
+      "<!-- paseo-daemon-install:start -->",
+      "### Install daemon from this release",
+      "",
+      "```sh",
+      "curl -fsSL https://example.test/install-paseo-daemon.sh | bash",
+      "```",
+      "<!-- paseo-daemon-install:end -->",
+    ].join("\n");
+
+    const execFileSync = (command, args) => {
+      if (args[0] === "api" && args[1] === "repos/getpaseo/paseo/releases/tags/v0.1.60-beta.1") {
+        return JSON.stringify({
+          id: 311163621,
+          body: `Old release notes.\n\n${installBlock}\n`,
+        });
+      }
+
+      if (args[0] === "api" && args[1] === "-X" && args[2] === "PATCH") {
+        const notesArg = args.find((arg) => arg.startsWith("body=@"));
+        assert.ok(notesArg);
+        syncedNotes = readFileSync(notesArg.slice("body=@".length), "utf8");
+        return "";
+      }
+
+      throw new Error(`Unexpected gh call: ${command} ${args.join(" ")}`);
+    };
+
+    syncReleaseNotes(["--repo", "getpaseo/paseo", "--tag", "v0.1.60-beta.1"], {
+      execFileSync,
+    });
+
+    assert.match(syncedNotes, /Beta notes\./);
+    assert.equal(syncedNotes.match(/paseo-daemon-install:start/g)?.length, 1);
+    assert.match(syncedNotes, /install-paseo-daemon\.sh/);
+    assert.doesNotMatch(syncedNotes, /Old release notes/);
+  });
+});
