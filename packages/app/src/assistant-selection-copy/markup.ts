@@ -1,10 +1,13 @@
-export const MARKDOWN_COPY_TAG_ATTRIBUTE = "data-paseo-markdown-tag";
-export const MARKDOWN_COPY_IGNORE_ATTRIBUTE = "data-paseo-markdown-ignore";
-export const MARKDOWN_COPY_UNWRAP_ATTRIBUTE = "data-paseo-markdown-unwrap";
-export const MARKDOWN_COPY_LIST_START_ATTRIBUTE = "data-paseo-markdown-list-start";
-export const MARKDOWN_COPY_LANGUAGE_ATTRIBUTE = "data-paseo-markdown-language";
-export const MARKDOWN_COPY_ALIGN_ATTRIBUTE = "data-paseo-markdown-align";
-
+/**
+ * FORK: only the `dataSet` builders below survive. Upstream also exported the six
+ * `MARKDOWN_COPY_*_ATTRIBUTE` attribute names for its selection-to-Markdown
+ * serializer; this fork deleted that serializer (see `surface.tsx`), so the names
+ * had no reader left.
+ *
+ * The attributes themselves still get stamped onto the rendered tree by
+ * `message.tsx` and are asserted by the browser e2e suite. Keeping them is what
+ * lets this fork leave `message.tsx` alone across upstream merges.
+ */
 export const markdownCopyDataSet = {
   blockquote: { paseoMarkdownTag: "blockquote" },
   br: { paseoMarkdownTag: "br" },
