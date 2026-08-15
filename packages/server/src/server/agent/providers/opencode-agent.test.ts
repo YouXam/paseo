@@ -480,6 +480,7 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
             models: {
               "big-pickle": {
                 name: "Big Pickle",
+                variants: { max: { reasoningEffort: "max" } },
                 limit: {
                   context: 200_000,
                 },
@@ -529,6 +530,11 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     expect(catalog.models[0]).toMatchObject({
       id: TEST_MODEL,
       label: "Big Pickle",
+      thinkingOptions: [
+        { id: "default", label: "Default", isDefault: true },
+        { id: "max", label: "max" },
+      ],
+      defaultThinkingOptionId: "default",
       metadata: {
         providerId: "opencode",
         modelId: "big-pickle",
@@ -824,7 +830,40 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
   }, 180_000);
 });
 
-describe("OpenCode adapter context-window normalization", () => {
+describe("OpenCode adapter normalization", () => {
+  test("omits OpenCode's implicit default variant from new and updated sessions", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCode = new TestOpenCodeClient();
+    openCode.sessionCreateResponse = { data: { id: "ses_default_variant" } };
+    openCode.sessionPromptAsyncEvents = [
+      { type: "session.idle", properties: { sessionID: "ses_default_variant" } },
+    ];
+    runtime.enqueueClient(openCode);
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd: "/workspace/repo",
+      model: "catalog-provider/single-variant-model",
+      thinkingOptionId: "default",
+    });
+
+    await collectTurnEvents(streamSession(session, "Use the model default"));
+    await session.setThinkingOption?.("max");
+    await collectTurnEvents(streamSession(session, "Use max"));
+    await session.setThinkingOption?.("default");
+    await collectTurnEvents(streamSession(session, "Return to the model default"));
+
+    expect(openCode.calls.sessionPromptAsync).toEqual([
+      expect.not.objectContaining({ variant: expect.anything() }),
+      expect.objectContaining({ variant: "max" }),
+      expect.not.objectContaining({ variant: expect.anything() }),
+    ]);
+    await session.close();
+  });
+
   test("builds OpenCode file parts for image prompt blocks", () => {
     expect(
       __openCodeInternals.buildOpenCodePromptParts([
@@ -1878,7 +1917,13 @@ describe("OpenCode adapter startTurn error handling", () => {
         provider: "opencode",
         item: {
           type: "todo",
-          items: [{ text: "Inspect current directory and existing files", completed: true }],
+          items: [
+            {
+              text: "Inspect current directory and existing files",
+              status: "completed",
+              completed: true,
+            },
+          ],
         },
       },
     ]);
@@ -1934,6 +1979,52 @@ describe("OpenCode adapter startTurn error handling", () => {
     if (failed?.type === "turn_failed") {
       expect(failed.error).toContain("boom: synchronous throw");
     }
+  });
+
+  test("sends exact Hub MCP permission grants without approving unrelated tools", async () => {
+    const promptAsync = vi.fn(async () => ({ data: {}, error: undefined }));
+    const fakeClient = {
+      global: {
+        event: vi.fn().mockImplementation(async ({ signal }: { signal: AbortSignal }) => ({
+          stream: {
+            async *[Symbol.asyncIterator](): AsyncGenerator<OpenCodeEvent> {
+              yield { type: "server.connected", properties: {} } as OpenCodeEvent;
+              await waitForAbort(signal);
+            },
+          },
+        })),
+      },
+      session: { promptAsync },
+    } as never;
+    const session = new __openCodeInternals.OpenCodeAgentSession(
+      {
+        provider: "opencode",
+        cwd: "/tmp/test",
+        providerOptions: { permission: { bash: "ask", hub_reply: "deny" } },
+        toolPolicy: {
+          preapproved: [{ kind: "mcp", server: "hub", tool: "finish_execution" }],
+        },
+      },
+      fakeClient,
+      "ses_unit_test",
+      createTestLogger(),
+    );
+
+    await session.startTurn("finish");
+
+    expect(promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permission: [
+          { permission: "hub_finish_execution", pattern: "*", action: "allow" },
+          { permission: "bash", pattern: "*", action: "ask" },
+          { permission: "hub_reply", pattern: "*", action: "deny" },
+        ],
+      }),
+    );
+    expect(promptAsync.mock.calls[0]?.[0].permission).not.toContainEqual(
+      expect.objectContaining({ permission: "bash", action: "allow" }),
+    );
+    await session.close();
   });
 
   test("waits for the stop abort and provider idle before starting the next prompt", async () => {
