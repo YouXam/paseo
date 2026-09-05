@@ -6,6 +6,9 @@ workers_dev = true
 [observability]
 enabled = true
 
+[observability.logs]
+invocation_logs = false
+
 [[durable_objects.bindings]]
 name = "RELAY"
 class_name = "RelayDurableObject"
