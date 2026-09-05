@@ -36,6 +36,8 @@ function reloadableConfig(
       maxProcessConcurrency: git.maxProcessConcurrency ?? 8,
     },
     app: { baseUrl: "https://app.paseo.sh" },
+    pluginsEnabled: persisted.pluginsEnabled ?? false,
+    plugins: persisted.plugins ?? {},
   };
 }
 
@@ -395,6 +397,48 @@ describe("DaemonConfigStore", () => {
       label: "Gemini",
       command: ["gemini", "--acp"],
       enabled: false,
+    });
+  });
+
+  test("patch persists provider Paseo-tool policy without changing availability", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ agents: { providers: { claude: { enabled: false } } } }),
+    );
+    const store = new DaemonConfigStore(paseoHome, {
+      mcp: { injectIntoAgents: true },
+      browserTools: { enabled: false },
+      providers: { claude: { enabled: false } },
+      metadataGeneration: { providers: [] },
+      autoArchiveAfterMerge: false,
+      enableTerminalAgentHooks: false,
+      appendSystemPrompt: "",
+    });
+
+    store.patch({
+      providers: {
+        claude: {
+          paseoTools: { enabled: true, disabledTools: ["list_agents"] },
+        },
+      },
+    });
+    store.patch({
+      providers: {
+        claude: {
+          paseoTools: { disabledTools: ["create_agent"] },
+        },
+      },
+    });
+
+    expect(store.get().providers.claude).toEqual({
+      enabled: false,
+      paseoTools: { enabled: true, disabledTools: ["create_agent"] },
+    });
+    expect(loadPersistedConfig(paseoHome).agents?.providers?.claude).toEqual({
+      enabled: false,
+      paseoTools: { enabled: true, disabledTools: ["create_agent"] },
     });
   });
 
@@ -938,6 +982,31 @@ describe("DaemonConfigStore reload", () => {
     });
     expect(store.get().browserTools.enabled).toBe(true);
     expect(store.get().git).toEqual({ maxProcessesPerSecond: 12, maxProcessConcurrency: 3 });
+  });
+
+  test("applies the global plugin switch in both directions", () => {
+    const { paseoHome, store, persisted } = createReloadableStore({
+      initialPersisted: { version: 1, pluginsEnabled: false },
+    });
+    const changes: unknown[] = [];
+    store.onFieldChange("pluginsEnabled", (value) => changes.push(value));
+
+    writeConfig(paseoHome, { ...persisted, pluginsEnabled: true });
+    expect(store.reload()).toEqual({
+      appliedPaths: ["pluginsEnabled"],
+      restartRequiredPaths: [],
+      overrideControlledPaths: [],
+    });
+    expect(store.get().pluginsEnabled).toBe(true);
+
+    writeConfig(paseoHome, { ...persisted, pluginsEnabled: false });
+    expect(store.reload()).toEqual({
+      appliedPaths: ["pluginsEnabled"],
+      restartRequiredPaths: [],
+      overrideControlledPaths: [],
+    });
+    expect(store.get().pluginsEnabled).toBe(false);
+    expect(changes).toEqual([true, false]);
   });
 
   test("classifies every leaf when a parent subtree is added", () => {

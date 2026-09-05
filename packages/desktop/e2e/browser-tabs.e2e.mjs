@@ -13,6 +13,7 @@ import { experimental_createMCPClient } from "ai";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { chromium } from "playwright";
 import { runAppearanceFontSizeRegression } from "./appearance-font-size.electron.mjs";
+import { runSettingsMemoryRegression } from "./settings-memory.electron.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const desktopDir = path.resolve(scriptDir, "..");
@@ -119,7 +120,7 @@ function seedPaseoHome(paseoHome, listen, workspaceRoot) {
     daemon: {
       listen,
       relay: { enabled: false },
-      mcp: { enabled: true, injectIntoAgents: false },
+      mcp: { enabled: true, injectIntoAgents: true },
       browserTools: { enabled: true },
       cors: { allowedOrigins: ["*"] },
     },
@@ -232,6 +233,20 @@ async function callBrowserTool(client, name, args = {}) {
   return mcpPayload(await client.callTool({ name, args }), name);
 }
 
+async function callBrowserToolUntilReady(client, name, args = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await client.callTool({ name, args });
+    const payload = result.structuredContent;
+    if (payload?.ok === true) return payload.result;
+    if (payload?.ok !== false || payload.error?.retryable !== true) {
+      return mcpPayload(result, name);
+    }
+    await delay(100);
+  }
+  throw new Error(`${name} remained unavailable for ${timeoutMs}ms`);
+}
+
 async function waitForGuestSelector(client, browserId) {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -240,6 +255,21 @@ async function waitForGuestSelector(client, browserId) {
       function: "() => Boolean(globalThis.__paseoSelector)",
     });
     if (JSON.parse(evaluated.resultJson) === true) {
+      return true;
+    }
+    await delay(50);
+  }
+  return false;
+}
+
+async function waitForGuestActiveElement(client, browserId, elementId) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const evaluated = await callBrowserTool(client, "browser_evaluate", {
+      browserId,
+      function: "() => document.activeElement?.id ?? null",
+    });
+    if (JSON.parse(evaluated.resultJson) === elementId) {
       return true;
     }
     await delay(50);
@@ -390,6 +420,41 @@ async function selectDeviceSize(page, label) {
   return !openPixels.equals(closedPixels);
 }
 
+async function selectElementAndReadAnnotationPaint({ page, client, browserId, artifactDir }) {
+  await clickGuestElement(page, client, browserId, "#bridge-target");
+  const comment = page.getByRole("textbox", {
+    name: "Message to the agent about this element…",
+  });
+  await comment.waitFor({ state: "visible", timeout: timeoutMs });
+  const bounds = await comment.boundingBox();
+  assert(bounds, "Element annotation comment box had no bounds");
+  const receivesInput = await comment.evaluate((element) => {
+    const elementBounds = element.getBoundingClientRect();
+    const target = document.elementFromPoint(
+      elementBounds.left + elementBounds.width / 2,
+      elementBounds.top + elementBounds.height / 2,
+    );
+    return target === element || element.contains(target);
+  });
+  const clip = {
+    x: Math.max(0, bounds.x),
+    y: Math.max(0, bounds.y),
+    width: bounds.width,
+    height: bounds.height,
+  };
+  const openPixels = await page.screenshot({
+    clip,
+    path: path.join(artifactDir, "element-annotation-open.png"),
+  });
+  await page.keyboard.press("Escape");
+  await comment.waitFor({ state: "hidden", timeout: timeoutMs });
+  const closedPixels = await page.screenshot({
+    clip,
+    path: path.join(artifactDir, "element-annotation-closed.png"),
+  });
+  return receivesInput && !openPixels.equals(closedPixels);
+}
+
 function recordViewportMismatch(failures, label, actual, expected) {
   if (actual.width === expected.width && actual.height === expected.height) {
     return;
@@ -442,12 +507,8 @@ async function runRegression({ page, client, serverId, targetUrl, callerAgentId,
   );
 
   await clickGuestElement(page, client, browserId, "#typing-target");
-  const activeGuestElement = await callBrowserTool(client, "browser_evaluate", {
-    browserId,
-    function: "() => document.activeElement?.id ?? null",
-  });
   assert(
-    JSON.parse(activeGuestElement.resultJson) === "typing-target",
+    await waitForGuestActiveElement(client, browserId, "typing-target"),
     "Physical browser click did not focus the guest input",
   );
   const focusedGuest = await page.evaluate(
@@ -531,9 +592,21 @@ async function runRegression({ page, client, serverId, targetUrl, callerAgentId,
   const responsiveViewport = await readViewport(client, browserId);
 
   await originalDeck.getByTestId(`workspace-tab-agent_${callerAgentId}`).click();
-  await page.waitForTimeout(500);
+  await page.waitForFunction(
+    ({ id, webContentsId }) => {
+      const webview = document.querySelector(`[data-paseo-browser-id="${id}"]`);
+      return (
+        webview?.parentElement?.getAttribute("data-paseo-browser-surface") === id &&
+        webview.parentElement.style.width === "1px" &&
+        webview.parentElement.style.pointerEvents === "none" &&
+        webview.getWebContentsId() === webContentsId
+      );
+    },
+    { id: browserId, webContentsId: firstGuest.webContentsId },
+    { timeout: timeoutMs },
+  );
   try {
-    await callBrowserTool(client, "browser_screenshot", { browserId });
+    await callBrowserToolUntilReady(client, "browser_screenshot", { browserId });
   } catch (error) {
     failures.push(`inactive browser remains captureable: ${String(error)}`);
   }
@@ -772,6 +845,35 @@ async function runRegression({ page, client, serverId, targetUrl, callerAgentId,
   await page.screenshot({ path: path.join(artifactDir, "local-page-screenshot-selector.png") });
   await originalDeck.getByRole("button", { name: "Cancel element selector" }).click();
 
+  await originalDeck.getByTestId(`workspace-tab-agent_${callerAgentId}`).click();
+  await page.getByTestId("sidebar-search").click();
+  await page.getByTestId("command-center-input").fill("Split pane right");
+  await page.getByText("Split pane right", { exact: true }).click();
+  assert(
+    (await originalDeck.getByTestId("workspace-tabs-row").filter({ visible: true }).count()) === 2,
+    "Split pane command did not produce two visible panes",
+  );
+  await originalDeck.getByTestId(`workspace-tab-browser_${browserId}`).last().click();
+  await originalDeck
+    .getByTestId(`browser-webview-clip-${browserId}`)
+    .waitFor({ state: "visible", timeout: timeoutMs });
+
+  const splitAnnotateButton = originalDeck.getByRole("button", { name: "Annotate element" });
+  await splitAnnotateButton.click();
+  assert(
+    await waitForGuestSelector(client, browserId),
+    "Element selector did not start in the split browser pane",
+  );
+  assert(
+    await selectElementAndReadAnnotationPaint({
+      page,
+      client,
+      browserId,
+      artifactDir,
+    }),
+    "Element annotation comment box did not paint or receive input above the browser surface",
+  );
+
   if (failures.length > 0) {
     throw new Error(`Browser viewport regressions:\n- ${failures.join("\n- ")}`);
   }
@@ -871,6 +973,15 @@ async function main() {
     const page = await waitForAppPage(browser, expoPort);
     const status = await waitForDesktopStatus(page);
 
+    const settingsMemory = await runSettingsMemoryRegression(page);
+    if (process.env.PASEO_DESKTOP_SETTINGS_MEMORY_ONLY === "1") {
+      writeJson(path.join(artifactDir, "result.json"), { settingsMemory });
+      console.log(
+        `Desktop Settings memory regression passed: ${settingsMemory.detachedAfterWarmRound} detached panes after warm and stress rotations.`,
+      );
+      return;
+    }
+
     await runAppearanceFontSizeRegression(page);
 
     const callerAgentId = await createCallerAgent(daemonPort);
@@ -888,7 +999,7 @@ async function main() {
       callerAgentId,
       artifactDir,
     });
-    writeJson(path.join(artifactDir, "result.json"), report);
+    writeJson(path.join(artifactDir, "result.json"), { ...report, settingsMemory });
     console.log(
       `Browser desktop browser E2E passed: WebContents ${report.originalWebContentsId} remained ${report.finalWebContentsId}; viewport, inactive capture, focus continuity, list, snapshot, click, local-page selectors passed.`,
     );

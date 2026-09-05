@@ -10,7 +10,6 @@ import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sections-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
-import { usePinnedTargetsStore } from "@/workspace-pins/store";
 import { useReviewDraftStore } from "@/review/store";
 import { type SyncStorageSnapshot } from "@/sync/merge";
 
@@ -37,6 +36,8 @@ export const SYNC_STORAGE_KEYS = [
   "workspace-browser-store",
   "sidebar-view",
   "sidebar-collapsed-sections",
+  // COMPAT(workspace-pins): feature removed upstream; key kept in snapshots so
+  // older devices can still import them.
   "pinned-tab-targets",
 ] as const;
 
@@ -135,7 +136,6 @@ const KEY_EFFECTS: Record<string, () => void | Promise<void>> = {
   "workspace-browser-store": () => useBrowserStore.persist.rehydrate(),
   "sidebar-view": () => useSidebarViewStore.persist.rehydrate(),
   "sidebar-collapsed-sections": () => useSidebarCollapsedSectionsStore.persist.rehydrate(),
-  "pinned-tab-targets": () => usePinnedTargetsStore.persist.rehydrate(),
   "@paseo:app-settings": () => queryClient.invalidateQueries({ queryKey: APP_SETTINGS_QUERY_KEY }),
   "@paseo:changes-preferences": () =>
     queryClient.invalidateQueries({ queryKey: CHANGES_PREFERENCES_QUERY_KEY }),

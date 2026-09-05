@@ -1,8 +1,27 @@
-import type { PluginProcessMessage, PluginProcessRequest } from "./plugin-process-protocol.js";
+import {
+  PluginProcessRequestSchema,
+  type PluginProcessMessage,
+  type PluginProcessRequest,
+} from "./plugin-process-protocol.js";
 import { createRequire } from "node:module";
-import { defineAttachmentSource, defineRpc, type PluginRpcContract } from "@paseo/plugin";
+import { defineAttachmentSource, defineRpc, type PluginRpcContract } from "@getpaseo/plugin";
+import {
+  ProviderEventSchema,
+  type ProviderConnection,
+  type ProviderRegistration,
+} from "@getpaseo/plugin/provider";
+import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import { createPaseoApi, type PaseoApi } from "@getpaseo/client";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { createPluginDaemonTransportFactory } from "./daemon-transport.js";
+import {
+  isPluginClientOnlySdkSpecifier,
+  isPluginSdkSpecifier,
+  isPluginServerTypesSdkSpecifier,
+} from "./plugin-sdk-specifiers.js";
+import { createPluginClientId } from "./plugin-session-identity.js";
 
-type RpcHandler = (input: unknown) => unknown | Promise<unknown>;
+type RpcHandler = (input: unknown, context: PluginHandlerContext) => unknown | Promise<unknown>;
 
 interface RegisteredRpc {
   contract: PluginRpcContract;
@@ -10,15 +29,40 @@ interface RegisteredRpc {
 }
 
 const handlers = new Map<string, RegisteredRpc>();
-let cleanup: (() => void) | null = null;
+const providers = new Map<string, ProviderRegistration>();
+const providerConnections = new Map<
+  string,
+  { connection: ProviderConnection; unsubscribe: () => void }
+>();
+const pendingProviderConnections = new Map<string, { tombstoned: boolean }>();
+let cleanup: (() => void | Promise<void>) | null = null;
+let daemonClient: DaemonClient | null = null;
+let paseo: PaseoApi | null = null;
+let stopping = false;
 const nodeRequire = createRequire(import.meta.url);
 
 function send(message: PluginProcessMessage): void {
   process.send?.(message);
 }
 
+function sendAndWait(message: PluginProcessMessage): Promise<void> {
+  return new Promise((resolve) => {
+    if (!process.send) {
+      resolve();
+      return;
+    }
+    process.send(message, () => resolve());
+  });
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function jsonTransportValue<Value>(value: Value): Value {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new Error("Provider value is not JSON-serializable");
+  return JSON.parse(encoded) as Value;
 }
 
 function validateMethod(method: string): string {
@@ -40,8 +84,120 @@ function register(contract: PluginRpcContract, handler: RpcHandler): void {
   handlers.set(method, { contract: { ...contract, name: method }, handler });
 }
 
+function registerProvider(provider: ProviderRegistration): void {
+  const id = provider.id.trim();
+  if (!/^[a-z][a-z0-9._-]*$/.test(id)) {
+    throw new Error(`Invalid plugin provider ID: ${provider.id}`);
+  }
+  if (!provider.label.trim()) throw new Error(`Plugin provider ${id} requires a label`);
+  if (typeof provider.connect !== "function") {
+    throw new Error(`Plugin provider ${id} must implement connect()`);
+  }
+  if (providers.has(id)) throw new Error(`Duplicate plugin provider ID: ${id}`);
+  providers.set(id, { ...provider, id });
+}
+
+function providerMetadata(provider: ProviderRegistration) {
+  return {
+    id: provider.id,
+    label: provider.label,
+    description: provider.description,
+    iconPath: provider.icon,
+  };
+}
+
+async function connectProvider(
+  message: Extract<PluginProcessRequest, { type: "provider.connect" }>,
+): Promise<void> {
+  if (stopping) throw new Error("Plugin is stopping");
+  const provider = providers.get(message.providerId);
+  if (!provider) throw new Error(`Unknown plugin provider: ${message.providerId}`);
+  if (
+    providerConnections.has(message.connectionId) ||
+    pendingProviderConnections.has(message.connectionId)
+  ) {
+    throw new Error(`Duplicate provider connection: ${message.connectionId}`);
+  }
+  const pending = { tombstoned: false };
+  pendingProviderConnections.set(message.connectionId, pending);
+  let connection: ProviderConnection;
+  try {
+    connection = await provider.connect(message.request);
+  } catch (error) {
+    pendingProviderConnections.delete(message.connectionId);
+    if (pending.tombstoned || stopping) return;
+    throw error;
+  }
+  pendingProviderConnections.delete(message.connectionId);
+  if (pending.tombstoned || stopping) {
+    await connection.close().catch(() => undefined);
+    return;
+  }
+  let unsubscribe = () => {};
+  unsubscribe = connection.onEvent((event) => {
+    try {
+      send({
+        type: "provider.event",
+        connectionId: message.connectionId,
+        event: ProviderEventSchema.parse(jsonTransportValue(event)),
+      });
+    } catch (error) {
+      providerConnections.delete(message.connectionId);
+      unsubscribe();
+      void connection.close().catch(() => undefined);
+      send({
+        type: "provider.closed",
+        connectionId: message.connectionId,
+        error: describeError(error),
+      });
+    }
+  });
+  providerConnections.set(message.connectionId, { connection, unsubscribe });
+  send({
+    type: "provider.connected",
+    connectionId: message.connectionId,
+    version: connection.version,
+    capabilities: connection.capabilities,
+  });
+}
+
+async function sendProviderInput(
+  message: Extract<PluginProcessRequest, { type: "provider.send" }>,
+): Promise<void> {
+  if (stopping) throw new Error("Plugin is stopping");
+  const current = providerConnections.get(message.connectionId);
+  if (!current) throw new Error(`Unknown provider connection: ${message.connectionId}`);
+  await current.connection.send(message.input);
+  send({
+    type: "provider.accepted",
+    connectionId: message.connectionId,
+    acceptanceId: message.acceptanceId,
+  });
+}
+
+async function closeProviderConnection(connectionId: string): Promise<void> {
+  const current = providerConnections.get(connectionId);
+  if (!current) return;
+  providerConnections.delete(connectionId);
+  current.unsubscribe();
+  await current.connection.close();
+  send({ type: "provider.closed", connectionId });
+}
+
+const pluginAuthorRuntime = {
+  defineAttachmentSource,
+  defineRpc,
+  Icon() {
+    throw new Error("Icon is available only in plugin client code");
+  },
+};
+
 function runtimeRequire(name: string): unknown {
-  if (name === "@paseo/plugin") return { defineAttachmentSource, defineRpc };
+  if (isPluginClientOnlySdkSpecifier(name)) {
+    throw new Error(`${name} is available only in plugin client code`);
+  }
+  if (isPluginServerTypesSdkSpecifier(name)) return {};
+  if (isPluginSdkSpecifier(name)) return pluginAuthorRuntime;
   return nodeRequire(name);
 }
 
@@ -55,36 +211,144 @@ function evaluateBundle(bundle: string): void {
   if (typeof setup !== "function") {
     throw new Error("Plugin server bundle must default export a function");
   }
-  const contributedCleanup = setup({ handle: register });
+  const contributedCleanup = setup({ handle: register, registerProvider });
   if (typeof contributedCleanup !== "function") {
     throw new Error("Plugin contribution must return a cleanup function");
   }
   cleanup = contributedCleanup;
 }
 
-process.on("message", (message: PluginProcessRequest) => {
-  if (message.type === "initialize") {
-    try {
-      evaluateBundle(message.bundle);
-      send({ type: "ready", methods: [...handlers.keys()].sort() });
-    } catch (error) {
-      send({ type: "fatal", error: describeError(error) });
+const transportFactory = createPluginDaemonTransportFactory({
+  send,
+  onMessage(handler) {
+    process.on("message", handler);
+    return () => process.off("message", handler);
+  },
+});
+
+async function initialize(message: Extract<PluginProcessRequest, { type: "initialize" }>) {
+  daemonClient = new DaemonClient({
+    url: `ipc://plugin/${encodeURIComponent(message.pluginId)}`,
+    clientId: createPluginClientId(message.pluginId),
+    clientType: "cli",
+    appVersion: message.appVersion,
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  paseo = createPaseoApi(daemonClient);
+  await daemonClient.connect();
+  evaluateBundle(message.bundle);
+  send({
+    type: "ready",
+    methods: [...handlers.keys()].sort(),
+    providers: [...providers.values()]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(providerMetadata),
+  });
+}
+
+async function shutdown(): Promise<void> {
+  if (stopping) return;
+  stopping = true;
+  for (const pending of pendingProviderConnections.values()) pending.tombstoned = true;
+  const currentCleanup = cleanup;
+  cleanup = null;
+  try {
+    await currentCleanup?.();
+  } catch (error) {
+    console.error("Plugin cleanup failed", error);
+  }
+  await Promise.all([...providerConnections.keys()].map(closeProviderConnection));
+  await daemonClient?.close().catch(() => undefined);
+  await sendAndWait({ type: "paseo_close" });
+  daemonClient = null;
+  paseo = null;
+  process.disconnect();
+}
+
+process.on("message", (rawMessage: unknown) => {
+  const parsed = PluginProcessRequestSchema.safeParse(rawMessage);
+  if (!parsed.success) {
+    const value = rawMessage as { connectionId?: unknown; acceptanceId?: unknown } | null;
+    if (value && typeof value.connectionId === "string" && typeof value.acceptanceId === "string") {
+      send({
+        type: "provider.rejected",
+        connectionId: value.connectionId,
+        acceptanceId: value.acceptanceId,
+        error: `Invalid provider input: ${parsed.error.message}`,
+      });
+      void closeProviderConnection(value.connectionId);
+      return;
     }
+    send({ type: "fatal", error: `Invalid plugin process request: ${parsed.error.message}` });
+    void shutdown();
+    return;
+  }
+  const message = parsed.data;
+  if (message.type === "initialize") {
+    void initialize(message).catch(async (error) => {
+      send({ type: "fatal", error: describeError(error) });
+      await daemonClient?.close().catch(() => undefined);
+    });
     return;
   }
   if (message.type === "shutdown") {
-    const currentCleanup = cleanup;
-    cleanup = null;
-    if (currentCleanup) {
-      try {
-        currentCleanup();
-      } catch (error) {
-        console.error("Plugin cleanup failed", error);
-      }
-    }
-    process.disconnect();
+    void shutdown();
     return;
   }
+  if (stopping) {
+    if (message.type === "provider.connect") {
+      send({
+        type: "provider.connect_failed",
+        connectionId: message.connectionId,
+        error: "Plugin is stopping",
+      });
+    } else if (message.type === "provider.send") {
+      send({
+        type: "provider.rejected",
+        connectionId: message.connectionId,
+        acceptanceId: message.acceptanceId,
+        error: "Plugin is stopping",
+      });
+    } else if (message.type === "provider.close") {
+      send({ type: "provider.closed", connectionId: message.connectionId });
+    }
+    return;
+  }
+  if (message.type === "provider.connect") {
+    void connectProvider(message).catch((error) => {
+      if (stopping) return;
+      send({
+        type: "provider.connect_failed",
+        connectionId: message.connectionId,
+        error: describeError(error),
+      });
+    });
+    return;
+  }
+  if (message.type === "provider.send") {
+    void sendProviderInput(message).catch((error) => {
+      if (stopping) return;
+      send({
+        type: "provider.rejected",
+        connectionId: message.connectionId,
+        acceptanceId: message.acceptanceId,
+        error: describeError(error),
+      });
+    });
+    return;
+  }
+  if (message.type === "provider.close") {
+    void closeProviderConnection(message.connectionId).catch((error) => {
+      send({
+        type: "provider.closed",
+        connectionId: message.connectionId,
+        error: describeError(error),
+      });
+    });
+    return;
+  }
+  if (message.type === "paseo_frame" || message.type === "paseo_close") return;
   const registered = handlers.get(message.method);
   if (!registered) {
     send({
@@ -96,7 +360,10 @@ process.on("message", (message: PluginProcessRequest) => {
   }
   void registered.contract.input
     .parseAsync(message.input)
-    .then(registered.handler)
+    .then((input) => {
+      if (!paseo) throw new Error("Plugin Paseo API is unavailable");
+      return registered.handler(input, { paseo });
+    })
     .then((output) => registered.contract.output.parseAsync(output))
     .then(
       (output) => send({ type: "result", requestId: message.requestId, output }),

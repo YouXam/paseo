@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 import { createCli } from "./cli.js";
 
 describe("canonical CLI surface", () => {
-  it("shows workspace and heartbeat commands while hiding worktree compatibility", () => {
+  it("offers daemon host selection as a global option", () => {
+    expect(createCli().helpInformation()).toContain("--host <host>");
+  });
+
+  it("shows project, workspace, and heartbeat commands while hiding worktree compatibility", () => {
     const cli = createCli();
     const help = cli.helpInformation();
+    expect(help).toContain("project");
     expect(help).toContain("workspace");
     expect(help).toContain("heartbeat");
     expect(help).not.toContain("worktree");
@@ -74,7 +79,10 @@ describe("canonical CLI surface", () => {
     expect(plugin?.commands.map((command) => command.name())).toEqual([
       "init",
       "ls",
+      "status",
+      "logs",
       "install",
+      "update",
       "reload",
       "enable",
       "disable",

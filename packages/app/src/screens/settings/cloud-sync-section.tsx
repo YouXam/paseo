@@ -160,7 +160,6 @@ export function CloudSyncSection() {
             <FormTextInput
               initialValue={endpointSeed}
               resetKey={`endpoint:${endpointSeed}`}
-              value={endpoint}
               onChangeText={setEndpoint}
               onBlur={handleEndpointBlur}
               autoCapitalize="none"
@@ -173,7 +172,6 @@ export function CloudSyncSection() {
             <FormTextInput
               initialValue={usernameSeed}
               resetKey={`username:${usernameSeed}`}
-              value={username}
               onChangeText={setUsername}
               autoCapitalize="none"
               autoCorrect={false}
@@ -184,7 +182,7 @@ export function CloudSyncSection() {
           {!isSignedIn ? (
             <Field label={t(`${CLOUD_SYNC_BASE_KEY}.password.label`)} testID="cloud-sync-password">
               <FormTextInput
-                value={password}
+                initialValue={password}
                 onChangeText={setPassword}
                 secureTextEntry
                 editable={!isBusy}
