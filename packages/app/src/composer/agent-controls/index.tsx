@@ -458,6 +458,44 @@ function buildAgentProviderModels(
   return map;
 }
 
+/**
+ * Shows the model the user just picked until the daemon settles the change. Setting a model can
+ * start the provider process first (seconds for Claude), and without this the picker keeps
+ * showing the old model the whole time, which reads as the click being ignored. A failed change
+ * clears the pending model, so the picker falls back to what the agent actually runs.
+ */
+function usePendingAgentModel() {
+  const [pendingModelId, setPendingModelId] = useState<string | null>(null);
+  const latestRequestRef = useRef(0);
+  const trackModelChange = useCallback(async (modelId: string, change: () => Promise<void>) => {
+    latestRequestRef.current += 1;
+    const requestId = latestRequestRef.current;
+    setPendingModelId(modelId);
+    try {
+      await change();
+    } finally {
+      if (latestRequestRef.current === requestId) {
+        setPendingModelId(null);
+      }
+    }
+  }, []);
+  return { pendingModelId, trackModelChange };
+}
+
+function resolveDisplayedAgentModelSelection(input: {
+  models: AgentModelDefinition[] | null;
+  agent: AgentControlsSlice;
+  pendingModelId: string | null;
+}) {
+  const { models, agent, pendingModelId } = input;
+  return resolveAgentModelSelection({
+    models,
+    runtimeModelId: pendingModelId ?? agent?.runtimeModelId,
+    configuredModelId: pendingModelId ?? agent?.model,
+    explicitThinkingOptionId: agent?.thinkingOptionId,
+  });
+}
+
 function buildOpenChangeHandler(
   selector: AgentControlSelector,
   setOpenSelector: (next: AgentControlSelector | null) => void,
@@ -1585,12 +1623,8 @@ export const AgentControls = memo(function AgentControls({
     });
   }, [agentProviderDefinitions, agentProviderModels, snapshotSelectedEntry]);
 
-  const modelSelection = resolveAgentModelSelection({
-    models,
-    runtimeModelId: agent?.runtimeModelId,
-    configuredModelId: agent?.model,
-    explicitThinkingOptionId: agent?.thinkingOptionId,
-  });
+  const { pendingModelId, trackModelChange } = usePendingAgentModel();
+  const modelSelection = resolveDisplayedAgentModelSelection({ models, agent, pendingModelId });
 
   const modelOptions = useMemo<AgentControlOption[]>(() => {
     return (models ?? []).map((model) => ({ id: model.id, label: model.label }));
@@ -1612,7 +1646,7 @@ export const AgentControls = memo(function AgentControls({
         return;
       }
       try {
-        await client.setAgentModel(agentId, modelId);
+        await trackModelChange(modelId, () => client.setAgentModel(agentId, modelId));
         await updatePreferences((current) =>
           mergeProviderPreferences({
             preferences: current,
@@ -1625,7 +1659,7 @@ export const AgentControls = memo(function AgentControls({
         toast.error(toErrorMessage(error));
       }
     },
-    [agentId, agentProvider, client, toast, updatePreferences],
+    [agentId, agentProvider, client, toast, trackModelChange, updatePreferences],
   );
   const handleSelectCommandCenterModel = useCallback(
     (_provider: AgentProvider, modelId: string) => handleSelectModel(modelId),

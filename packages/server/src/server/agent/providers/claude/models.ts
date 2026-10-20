@@ -154,6 +154,26 @@ export function normalizeClaudeRuntimeModelId(value: string | null | undefined):
 }
 
 /**
+ * Resolve the agent's model from the model Claude Code reports in its init frame.
+ *
+ * When Claude Code echoes the model Paseo configured, the configured id is the catalog entry
+ * the user picked, so keep it (canonicalized only if it is a first-party spelling). Runtime
+ * normalization strips gateway prefixes and would report `anthropic/claude-opus-5[1m]` — a
+ * separate `additionalModels` entry — as plain Opus 5, which the model picker then shows as
+ * the selection. Anything else (default model, aliases, Bedrock ids) is normalized as before.
+ */
+export function resolveClaudeInitModelId(
+  runtimeModel: string,
+  configuredModel: string | null | undefined,
+): string | null {
+  const configured = configuredModel?.trim();
+  if (configured && runtimeModel.trim() === configured) {
+    return normalizeClaudeManifestModelId(configured) ?? configured;
+  }
+  return normalizeClaudeRuntimeModelId(runtimeModel);
+}
+
+/**
  * Placeholder model values Claude Code writes on frames with no real inference behind them.
  * These are not models and must never be displayed.
  */

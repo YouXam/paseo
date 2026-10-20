@@ -13,7 +13,12 @@ import {
   parseClaudeCodeVersion,
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
-import { findClaudeModel, getClaudeModels, normalizeClaudeRuntimeModelId } from "./models.js";
+import {
+  findClaudeModel,
+  getClaudeModels,
+  normalizeClaudeRuntimeModelId,
+  resolveClaudeInitModelId,
+} from "./models.js";
 
 const createdClaudeConfigDirs: string[] = [];
 
@@ -416,6 +421,34 @@ describe("normalizeClaudeRuntimeModelId", () => {
     expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-4-8-20260101")).toBe(
       "claude-opus-4-8",
     );
+  });
+
+  it("does not collapse an unknown minor version onto its major", () => {
+    expect(normalizeClaudeRuntimeModelId("anthropic/claude-opus-5.5[1m]")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-5")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("anthropic/claude-fable-5.1")).toBe("claude-fable-5-1");
+  });
+});
+
+describe("resolveClaudeInitModelId", () => {
+  it("keeps a configured gateway model that Claude Code echoes back", () => {
+    expect(
+      resolveClaudeInitModelId("anthropic/claude-opus-5[1m]", "anthropic/claude-opus-5[1m]"),
+    ).toBe("anthropic/claude-opus-5[1m]");
+    expect(
+      resolveClaudeInitModelId("anthropic/claude-opus-5.5[1m]", "anthropic/claude-opus-5.5[1m]"),
+    ).toBe("anthropic/claude-opus-5.5[1m]");
+  });
+
+  it("canonicalizes an echoed first-party spelling", () => {
+    expect(resolveClaudeInitModelId("claude-fable-5[1m]", "claude-fable-5[1m]")).toBe(
+      "claude-fable-5",
+    );
+  });
+
+  it("normalizes runtime models that differ from the configured one", () => {
+    expect(resolveClaudeInitModelId("claude-opus-5-20260724", "opus")).toBe("claude-opus-5");
+    expect(resolveClaudeInitModelId("claude-sonnet-5-20260101", undefined)).toBe("claude-sonnet-5");
   });
 });
 

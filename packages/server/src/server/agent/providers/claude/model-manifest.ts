@@ -363,31 +363,31 @@ export function normalizeClaudeRuntimeModelId(value: string | null | undefined):
     return null;
   }
 
+  // Major.minor first, and no fallback to the major alone: `claude-opus-5.5` is not Opus 5.
+  // The minor is at most two digits so a dated suffix (`claude-opus-5-20260724`) still
+  // reads as a single-segment id.
+  const runtimeMatch = trimmed.match(
+    /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)[-.](\d{1,2})(?!\d)(\[1m\])?/i,
+  );
+  if (runtimeMatch) {
+    return normalizeMajorMinorClaudeModelId(
+      runtimeMatch[1],
+      runtimeMatch[2],
+      runtimeMatch[3],
+      trimmed.toLowerCase().includes("[1m]"),
+    );
+  }
+
   const singleSegmentMatch = trimmed.match(
     /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)(\[1m\])?/i,
   );
-  if (singleSegmentMatch) {
-    const normalizedModelId = normalizeSingleSegmentClaudeModelId(
-      singleSegmentMatch[1],
-      singleSegmentMatch[2],
-      trimmed.toLowerCase().includes("[1m]"),
-    );
-    if (normalizedModelId) {
-      return normalizedModelId;
-    }
-  }
-
-  const runtimeMatch = trimmed.match(
-    /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)[-.](\d+)(\[1m\])?/i,
-  );
-  if (!runtimeMatch) {
+  if (!singleSegmentMatch) {
     return null;
   }
 
-  return normalizeMajorMinorClaudeModelId(
-    runtimeMatch[1],
-    runtimeMatch[2],
-    runtimeMatch[3],
+  return normalizeSingleSegmentClaudeModelId(
+    singleSegmentMatch[1],
+    singleSegmentMatch[2],
     trimmed.toLowerCase().includes("[1m]"),
   );
 }

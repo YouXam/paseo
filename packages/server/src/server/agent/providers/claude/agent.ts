@@ -33,7 +33,7 @@ import {
 import {
   findClaudeModel,
   getClaudeModelsWithSettings,
-  normalizeClaudeRuntimeModelId,
+  resolveClaudeInitModelId,
   resolveConfiguredClaudeModel,
 } from "./models.js";
 import {
@@ -4562,7 +4562,7 @@ class ClaudeAgentSession implements AgentSession {
     }
     this.persistence = null;
     if (message.model) {
-      const normalizedRuntimeModel = normalizeClaudeRuntimeModelId(message.model);
+      const normalizedRuntimeModel = resolveClaudeInitModelId(message.model, this.config.model);
       this.logger.debug(
         { runtimeModel: message.model, normalizedRuntimeModel },
         "Captured runtime model from SDK init",
