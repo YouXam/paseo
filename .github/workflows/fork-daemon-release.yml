@@ -58,6 +58,7 @@ jobs:
           prefix="$RUNNER_TEMP/paseo-daemon-install"
           tarballs=(
             .release-assets/packages/getpaseo-highlight-*.tgz
+            .release-assets/packages/getpaseo-plugin-*.tgz
             .release-assets/packages/getpaseo-relay-*.tgz
             .release-assets/packages/getpaseo-protocol-*.tgz
             .release-assets/packages/getpaseo-client-*.tgz

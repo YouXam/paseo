@@ -123,6 +123,7 @@ find_one() {
 
 tarballs=(
   "$(find_one 'getpaseo-highlight-*.tgz')"
+  "$(find_one 'getpaseo-plugin-*.tgz')"
   "$(find_one 'getpaseo-relay-*.tgz')"
   "$(find_one 'getpaseo-protocol-*.tgz')"
   "$(find_one 'getpaseo-client-*.tgz')"

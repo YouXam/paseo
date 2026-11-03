@@ -4,6 +4,7 @@ import path from "node:path";
 
 const daemonWorkspaces = [
   "@getpaseo/highlight",
+  "@getpaseo/plugin",
   "@getpaseo/relay",
   "@getpaseo/protocol",
   "@getpaseo/client",
