@@ -1,7 +1,10 @@
+import appPackage from "../../../package.json";
 import { describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { pluginRegistry } from "../registry";
 import { panelTargetSupportsHost, resolvePluginPanelOpenLocation } from "./locations";
+
+const audio = { play: async () => 0 };
 
 vi.mock("../navigation", () => ({
   createPluginNavigation: () => ({}),
@@ -12,7 +15,8 @@ vi.mock("../client-runtime", () => ({
     rpc: async () => undefined,
     openSurface: () => undefined,
     openPanel: () => undefined,
-    addComposerPill: () => () => undefined,
+    addComposerPill: () => ({ update() {}, remove() {} }),
+    addHeaderButton: () => ({ update() {}, remove() {} }),
   }),
 }));
 
@@ -30,9 +34,14 @@ function install(locations: readonly ("workspace" | "explorer")[]) {
       return function() {};
     }};
   })`;
-  pluginRegistry.installCatalog("host-1", [{ id: "review", clientBundle: bundle }], {
-    client: {} as DaemonClient,
-  });
+  pluginRegistry.installCatalog(
+    "host-1",
+    [{ id: "review", requirements: { paseo: `>=${appPackage.version}` }, clientBundle: bundle }],
+    {
+      client: {} as DaemonClient,
+      audio,
+    },
+  );
   return pluginRegistry.getSnapshot()[0]!;
 }
 

@@ -18,6 +18,7 @@ import {
 } from "../support/helpers/terminal-perf";
 import {
   connectWorkspaceSetupClient,
+  setupCommandOutput,
   createWorkspaceThroughDaemon,
   expectSetupPanel,
   openHomeWithProject,
@@ -28,6 +29,7 @@ import {
   closeWorkspaceScriptsMenu,
   seedProjectForWorkspaceSetup,
   waitForWorkspaceSetupProgress,
+  observeSetupPanelTraffic,
 } from "../support/helpers/workspace-setup";
 
 interface WorkspaceScriptStarter {
@@ -87,12 +89,12 @@ test.describe("Workspace setup streaming", () => {
     try {
       await seedProjectForWorkspaceSetup(client, repo.path);
 
-      // Wait for setup completion via daemon (setup snapshots are per-session,
-      // so the browser session won't receive progress events).
+      // The setup client owns progress before creating the workspace.
       const completed = waitForWorkspaceSetupProgress(
         client,
         (payload) =>
-          payload.status === "completed" && payload.detail.log.includes("setup complete"),
+          payload.status === "completed" &&
+          setupCommandOutput(payload.detail).includes("setup complete"),
       );
       const workspace = await createWorkspaceThroughDaemon(client, {
         cwd: repo.path,
@@ -117,6 +119,45 @@ test.describe("Workspace setup streaming", () => {
     }
   });
 
+  test("setup panel releases details while retained behind another tab and resubscribes when shown", async ({
+    page,
+  }) => {
+    const client = await connectWorkspaceSetupClient();
+    const repo = await createTempGitRepo("setup-membership-", {
+      paseoConfig: { worktree: { setup: ["echo setup complete"] } },
+    });
+    const traffic = observeSetupPanelTraffic(page);
+    try {
+      await seedProjectForWorkspaceSetup(client, repo.path);
+      const completed = waitForWorkspaceSetupProgress(
+        client,
+        (payload) => payload.status === "completed",
+      );
+      const workspace = await createWorkspaceThroughDaemon(client, {
+        cwd: repo.path,
+        worktreeSlug: "setup-membership",
+      });
+      await completed;
+      await openHomeWithProject(page, repo.path);
+      await navigateToWorkspaceViaSidebar(page, workspace.id);
+      await expectSetupTabNotSeeded(page, workspace.id);
+      await traffic.expectNoDemand();
+      await expectSetupPanel(page);
+      await traffic.expectSubscribed(workspace.id, 1);
+      await expect(page.getByTestId("workspace-setup-log").first()).toContainText("setup complete");
+      await clickNewChat(page);
+      await expectComposerVisible(page);
+      await traffic.expectReleased(0);
+      await expectSetupPanel(page);
+      await traffic.expectSubscribed(workspace.id, 2);
+      await closeSetupTab(page, workspace.id);
+      await traffic.expectReleased(1);
+    } finally {
+      await client.close();
+      await repo.cleanup();
+    }
+  });
+
   daemonTest("streams running and completed setup snapshots for a successful setup", async () => {
     const client = await connectWorkspaceSetupClient();
     const repo = await createTempGitRepo("setup-success-", {
@@ -131,16 +172,19 @@ test.describe("Workspace setup streaming", () => {
       await seedProjectForWorkspaceSetup(client, repo.path);
       const initialRunning = waitForWorkspaceSetupProgress(
         client,
-        (payload) => payload.status === "running" && payload.detail.log === "",
+        (payload) => payload.status === "running" && payload.detail.commands.length === 0,
       );
       const runningWithOutput = waitForWorkspaceSetupProgress(
         client,
-        (payload) => payload.status === "running" && payload.detail.log.includes("starting setup"),
+        (payload) =>
+          payload.status === "running" &&
+          setupCommandOutput(payload.detail).includes("starting setup"),
       );
       const completed = waitForWorkspaceSetupProgress(
         client,
         (payload) =>
-          payload.status === "completed" && payload.detail.log.includes("setup complete"),
+          payload.status === "completed" &&
+          setupCommandOutput(payload.detail).includes("setup complete"),
       );
 
       await createWorkspaceThroughDaemon(client, {
@@ -153,8 +197,8 @@ test.describe("Workspace setup streaming", () => {
       const completedPayload = await completed;
 
       expect(initialPayload.detail.log).toBe("");
-      expect(runningPayload.detail.log).toContain("starting setup");
-      expect(completedPayload.detail.log).toContain("setup complete");
+      expect(setupCommandOutput(runningPayload.detail)).toContain("starting setup");
+      expect(setupCommandOutput(completedPayload.detail)).toContain("setup complete");
       expect(completedPayload.error).toBeNull();
     } finally {
       await client.close();
@@ -176,7 +220,9 @@ test.describe("Workspace setup streaming", () => {
       await seedProjectForWorkspaceSetup(client, repo.path);
       const failed = waitForWorkspaceSetupProgress(
         client,
-        (payload) => payload.status === "failed" && payload.detail.log.includes("setup failed"),
+        (payload) =>
+          payload.status === "failed" &&
+          setupCommandOutput(payload.detail).includes("setup failed"),
       );
 
       const workspace = await createWorkspaceThroughDaemon(client, {
@@ -185,8 +231,8 @@ test.describe("Workspace setup streaming", () => {
       });
 
       const failedPayload = await failed;
-      expect(failedPayload.detail.log).toContain("starting setup");
-      expect(failedPayload.detail.log).toContain("setup failed");
+      expect(setupCommandOutput(failedPayload.detail)).toContain("starting setup");
+      expect(setupCommandOutput(failedPayload.detail)).toContain("setup failed");
       expect(failedPayload.error).toMatch(/failed/i);
 
       await openHomeWithProject(page, repo.path);
@@ -198,6 +244,41 @@ test.describe("Workspace setup streaming", () => {
       await leaveWorkspaceViaHistory(page);
       await navigateToWorkspaceViaSidebar(page, workspace.id);
       await expectSetupTabNotSeeded(page, workspace.id);
+    } finally {
+      await client.close();
+      await repo.cleanup();
+    }
+  });
+
+  test("keeps a workspace usable when its setup config cannot be parsed", async ({ page }) => {
+    const client = await connectWorkspaceSetupClient();
+    const repo = await createTempGitRepo("setup-invalid-config-", {
+      files: [{ path: "paseo.json", content: "{ invalid json\n" }],
+    });
+
+    try {
+      await seedProjectForWorkspaceSetup(client, repo.path);
+      const failed = waitForWorkspaceSetupProgress(
+        client,
+        (payload) => payload.status === "failed",
+      );
+      const workspace = await createWorkspaceThroughDaemon(client, {
+        cwd: repo.path,
+        worktreeSlug: "workspace-setup-invalid-config",
+      });
+      const failedPayload = await failed;
+      expect(failedPayload.error).toContain("Failed to parse paseo.json");
+      expect(failedPayload.detail.commands).toEqual([]);
+
+      await openHomeWithProject(page, repo.path);
+      await navigateToWorkspaceViaSidebar(page, workspace.id);
+      await expectFailedSetupTabSeededInMainPane(page, workspace.id);
+      await expect(page.getByText(/Failed to parse paseo\.json at/)).toBeVisible();
+      await closeSetupTab(page, workspace.id);
+      await clickNewChat(page);
+      await expectComposerVisible(page);
+      await openFileExplorer(page);
+      await expectExplorerEntryVisible(page, "paseo.json");
     } finally {
       await client.close();
       await repo.cleanup();
@@ -257,7 +338,8 @@ test.describe("Workspace setup streaming", () => {
       const completed = waitForWorkspaceSetupProgress(
         client,
         (payload) =>
-          payload.status === "completed" && payload.detail.log.includes("setup complete"),
+          payload.status === "completed" &&
+          setupCommandOutput(payload.detail).includes("setup complete"),
       );
       const workspace = await createWorkspaceThroughDaemon(client, {
         cwd: repo.path,
@@ -303,7 +385,8 @@ test.describe("Workspace setup streaming", () => {
       const completed = waitForWorkspaceSetupProgress(
         client,
         (payload) =>
-          payload.status === "completed" && payload.detail.log.includes("setup complete"),
+          payload.status === "completed" &&
+          setupCommandOutput(payload.detail).includes("setup complete"),
       );
 
       const result = await client.createPaseoWorktree({

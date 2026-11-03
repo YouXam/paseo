@@ -1,17 +1,21 @@
+import appPackage from "../../package.json";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { pluginRegistry as registry } from "./registry";
+
+const audio = { play: async () => 0 };
 
 vi.mock("./navigation", () => ({
   createPluginNavigation: () => ({}),
 }));
 vi.mock("./client-runtime", () => ({
   createPluginClientRuntime: () => ({
-    paseo: {},
+    paseo: { dispose: async () => {} },
     rpc: async () => undefined,
     openSurface: () => undefined,
     openPanel: () => undefined,
-    addComposerPill: () => () => undefined,
+    addComposerPill: () => ({ update() {}, remove() {} }),
+    addHeaderButton: () => ({ update() {}, remove() {} }),
   }),
 }));
 
@@ -23,9 +27,13 @@ const pluginRegistry = {
   installCatalog(
     serverId: string,
     catalog: Parameters<typeof registry.installCatalog>[1],
-    options: { replacePluginId?: string } = {},
+    options: { replacePluginId?: string; client?: DaemonClient } = {},
   ) {
-    return registry.installCatalog(serverId, catalog, { ...options, client: daemonClient });
+    return registry.installCatalog(
+      serverId,
+      catalog.map((entry) => ({ ...entry, requirements: { paseo: `>=${appPackage.version}` } })),
+      { client: daemonClient, ...options, audio },
+    );
   },
 };
 
@@ -108,6 +116,37 @@ describe("PluginRegistry", () => {
     expect(second).toBe(first);
     expect(second?.queryClient).toBe(first?.queryClient);
     expect(second?.queryClient.getQueryData(["counter"])).toBe(3);
+  });
+
+  it("keeps the snapshot when the same catalog is installed again", () => {
+    const clientBundle = timelineBundle("one");
+    pluginRegistry.installCatalog("host-a", [{ id: "reports", clientBundle }]);
+    const snapshot = pluginRegistry.getSnapshot();
+    const transformers = snapshot[0]?.timelineTransformers;
+    const listener = vi.fn();
+    const unsubscribe = pluginRegistry.subscribe(listener);
+
+    pluginRegistry.installCatalog("host-a", [{ id: "reports", clientBundle }]);
+    unsubscribe();
+
+    expect(pluginRegistry.getSnapshot()).toBe(snapshot);
+    expect(pluginRegistry.getSnapshot()[0]?.timelineTransformers).toBe(transformers);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("reinstalls an unchanged bundle for a new host client", () => {
+    const clientBundle = bundle("one");
+    pluginRegistry.installCatalog("host-a", [{ id: "example", clientBundle }]);
+    const first = pluginRegistry.getSnapshot()[0];
+
+    pluginRegistry.installCatalog("host-a", [{ id: "example", clientBundle }], {
+      client: {} as DaemonClient,
+    });
+
+    const second = pluginRegistry.getSnapshot()[0];
+    expect(second).not.toBe(first);
+    expect(first?.lifetime.signal.aborted).toBe(true);
+    expect(Reflect.get(globalThis, "__pluginCleanups")).toBe(1);
   });
 
   it("replaces the query cache when the plugin bundle changes", () => {

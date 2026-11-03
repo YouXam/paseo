@@ -8,7 +8,7 @@ import {
 } from "@/utils/diff-layout";
 import { compactHighlightTokens } from "@/utils/diff-rendering";
 import { getInlineReviewThreadState, getSplitInlineReviewThreadState } from "@/review/geometry";
-import { advancesFor } from "./text-measurement";
+import { advancesFor, requiresShaping } from "./text-measurement";
 import type {
   BuildDiffDocumentModelInput,
   DiffCell,
@@ -154,24 +154,40 @@ function appendReusableFileRows(candidate: {
 }): FileRowsResult {
   const reusedRows = candidate.model.rows.slice(candidate.file.rowStart, candidate.file.rowEnd);
   const retainsRowGeometry =
-    !candidate.input.wrapLines &&
     candidate.model.reviewGeometryKey === candidate.reviewGeometryKey &&
     candidate.file.top === candidate.fileTop &&
+    candidate.file.fileIndex === candidate.fileIndex &&
     candidate.file.rowStart === candidate.rows.length;
-  if (retainsRowGeometry) {
-    candidate.rows.push(...reusedRows);
-    return {
-      bottom: candidate.bodyTop + candidate.file.bodyHeight,
-      maximumHorizontalOverflow: Math.max(
-        0,
-        candidate.file.contentWidth - candidate.input.viewportWidth,
-      ),
-    };
-  }
-
   let top = candidate.bodyTop;
   for (const reusedRow of reusedRows) {
-    const nextRow = repositionReusedRow(reusedRow, candidate, top);
+    let nextRow =
+      retainsRowGeometry && reusedRow.top === top
+        ? reusedRow
+        : repositionReusedRow(reusedRow, candidate, top);
+    if (
+      nextRow.kind === "line" &&
+      (intersectsMaterializationWindow(candidate.input, top, top + nextRow.height) ||
+        containsMaterializationAnchor(candidate.input, candidate.file.path, nextRow.cells)) &&
+      nextRow.cells.some((cell) => cell && cell.fragments.length === 0)
+    ) {
+      const cells = materializeCells(
+        nextRow.cells,
+        candidate.file.file,
+        candidate.file.gutterWidth,
+        candidate.input,
+      );
+      nextRow = {
+        ...nextRow,
+        cells,
+        height:
+          Math.max(
+            candidate.input.typography.lineHeight,
+            ...cells.map(
+              (cell) => (cell?.fragments.length ?? 1) * candidate.input.typography.lineHeight,
+            ),
+          ) + nextRow.reviewHeight,
+      };
+    }
     candidate.rows.push(nextRow);
     top += nextRow.height;
   }
@@ -232,71 +248,46 @@ function appendNewFileRows(candidate: {
     };
   }
 
-  const deferredLines =
-    candidate.input.materializationWindow && !candidate.input.wrapLines
-      ? geometryLines(lineSources(candidate.file, candidate.input.layout, false), candidate.input)
-      : null;
-  const deferredBodyHeight = deferredLines?.reduce((height, line) => height + line.height, 0) ?? 0;
-  const shouldMaterialize =
-    deferredLines === null ||
-    intersectsMaterializationWindow(
-      candidate.input,
-      candidate.fileTop,
-      candidate.bodyTop + deferredBodyHeight + DIFF_BODY_BORDER_HEIGHT,
-    );
-  return shouldMaterialize
-    ? appendMeasuredFileRows(candidate)
-    : appendGeometryFileRows(candidate, deferredLines);
-}
-
-function appendGeometryFileRows(
-  candidate: Parameters<typeof appendNewFileRows>[0],
-  lines: readonly GeometryLine[],
-): FileRowsResult {
-  let top = candidate.bodyTop;
-  for (const line of lines) {
-    candidate.rows.push({
-      kind: "line",
-      index: candidate.rows.length,
-      fileIndex: candidate.fileIndex,
-      path: candidate.file.path,
-      top,
-      height: line.height,
-      cells: line.cells,
-      reviewHeight: line.reviewHeight,
-    });
-    top += line.height;
-  }
-  return { bottom: top + DIFF_BODY_BORDER_HEIGHT, maximumHorizontalOverflow: 0 };
-}
-
-function appendMeasuredFileRows(
-  candidate: Parameters<typeof appendNewFileRows>[0],
-): FileRowsResult {
+  const lines = geometryLines(
+    lineSources(candidate.file, candidate.input.layout, false),
+    candidate.input,
+    candidate.gutterWidth,
+  );
+  const fileBottom =
+    candidate.bodyTop +
+    lines.reduce((height, line) => height + line.height, 0) +
+    DIFF_BODY_BORDER_HEIGHT;
+  const measureWidth =
+    !candidate.input.wrapLines &&
+    intersectsMaterializationWindow(candidate.input, candidate.fileTop, fileBottom);
   let top = candidate.bodyTop;
   let maximumHorizontalOverflow = 0;
-  for (const sourceCells of lineSources(candidate.file, candidate.input.layout, true)) {
-    const columnCount = sourceCells.length;
-    const columnWidth = candidate.input.viewportWidth / columnCount;
-    const availableWidth = Math.max(
-      candidate.input.measureText.measure("M"),
-      columnWidth - candidate.gutterWidth - CODE_HORIZONTAL_PADDING,
-    );
-    const cells = sourceCells.map((source) => {
-      if (!source) return null;
-      const cell = measureCell({ source, availableWidth, input: candidate.input });
-      maximumHorizontalOverflow = Math.max(
-        maximumHorizontalOverflow,
-        candidate.gutterWidth + CODE_HORIZONTAL_PADDING + measureCellWidth(cell) - columnWidth,
-      );
-      return cell;
-    }) as DiffLineRow["cells"];
+  for (const line of lines) {
+    const shouldMaterialize =
+      intersectsMaterializationWindow(candidate.input, top, top + line.height) ||
+      containsMaterializationAnchor(candidate.input, candidate.file.path, line.cells);
+    const cells = shouldMaterialize
+      ? materializeCells(line.cells, candidate.file, candidate.gutterWidth, candidate.input)
+      : line.cells;
+    const columnWidth = candidate.input.viewportWidth / cells.length;
+    if (measureWidth) {
+      for (const cell of cells) {
+        if (!cell) continue;
+        const width =
+          cell.fragments.length > 0
+            ? measureCellWidth(cell)
+            : candidate.input.measureText.measure(displayLineText(cell.content));
+        maximumHorizontalOverflow = Math.max(
+          maximumHorizontalOverflow,
+          candidate.gutterWidth + CODE_HORIZONTAL_PADDING + width - columnWidth,
+        );
+      }
+    }
     const textHeight = Math.max(
       candidate.input.typography.lineHeight,
       ...cells.map((cell) => (cell?.fragments.length ?? 1) * candidate.input.typography.lineHeight),
     );
-    const reviewHeight = reviewHeightForCells(cells, candidate.input);
-    const height = textHeight + reviewHeight;
+    const height = shouldMaterialize ? textHeight + line.reviewHeight : line.height;
     candidate.rows.push({
       kind: "line",
       index: candidate.rows.length,
@@ -305,11 +296,44 @@ function appendMeasuredFileRows(
       top,
       height,
       cells,
-      reviewHeight,
+      reviewHeight: line.reviewHeight,
     });
     top += height;
   }
   return { bottom: top + DIFF_BODY_BORDER_HEIGHT, maximumHorizontalOverflow };
+}
+
+function materializeCells(
+  cells: DiffLineRow["cells"],
+  file: BuildDiffDocumentModelInput["files"][number],
+  gutterWidth: number,
+  input: BuildDiffDocumentModelInput,
+): DiffLineRow["cells"] {
+  const availableWidth = Math.max(
+    input.measureText.measure("M"),
+    input.viewportWidth / cells.length - gutterWidth - CODE_HORIZONTAL_PADDING,
+  );
+  return cells.map((cell) => {
+    if (!cell || cell.fragments.length > 0) return cell;
+    const sourceLine =
+      file.hunks[cell.sourceIdentity.hunkIndex]!.lines[cell.sourceIdentity.lineIndex]!;
+    return measureCell({
+      source: {
+        ...cell,
+        tokenText: cell.type === "header" ? [] : compactHighlightTokens(sourceLine.tokens ?? []),
+      },
+      availableWidth,
+      input,
+    });
+  }) as DiffLineRow["cells"];
+}
+
+function displayLineText(text: string): string {
+  return text.includes("\t")
+    ? segmentGraphemes(text)
+        .map((segment) => segment.text)
+        .join("")
+    : text;
 }
 
 export function reviewGeometryKey(
@@ -334,7 +358,11 @@ export function retainReusableModels(
   previous: readonly DiffDocumentModel[] | undefined,
   next: DiffDocumentModel,
 ): DiffDocumentModel[] {
-  const fullest = [...(previous ?? []), next].reduce((best, candidate) =>
+  const sources = new Set(next.files.map((file) => file.file));
+  const compatible = previous?.filter((model) =>
+    model.files.every((file) => sources.has(file.file)),
+  );
+  const fullest = [...(compatible ?? []), next].reduce((best, candidate) =>
     measuredFileCount(candidate) > measuredFileCount(best) ? candidate : best,
   );
   return fullest === next ? [next] : [fullest, next];
@@ -396,13 +424,14 @@ function cellSource(line: SplitDiffDisplayLine | null, includeTokens: boolean): 
   };
 }
 
-function geometryCell(source: CellSource): DiffCell {
+function geometryCell(source: CellSource, estimatedWrapColumns: number): DiffCell {
   return {
     type: source.type,
     content: source.content,
     lineNumber: source.lineNumber,
     tokens: [],
     fragments: [],
+    estimatedWrapColumns,
     reviewTarget: source.reviewTarget,
     sourceIdentity: source.sourceIdentity,
   };
@@ -411,18 +440,85 @@ function geometryCell(source: CellSource): DiffCell {
 function geometryLines(
   sources: Array<[CellSource] | [CellSource | null, CellSource | null]>,
   input: BuildDiffDocumentModelInput,
+  gutterWidth: number,
 ): GeometryLine[] {
+  const characterWidth = input.wrapLines ? input.measureText.measure("M") : 0;
   return sources.map((sourceCells) => {
+    const columns = input.wrapLines
+      ? Math.max(
+          1,
+          Math.floor(
+            (input.viewportWidth / sourceCells.length - gutterWidth - CODE_HORIZONTAL_PADDING) /
+              characterWidth,
+          ),
+        )
+      : Infinity;
     const cells = sourceCells.map((source) =>
-      source ? geometryCell(source) : null,
+      source ? geometryCell(source, columns) : null,
     ) as DiffLineRow["cells"];
     const reviewHeight = reviewHeightForCells(cells, input);
     return {
       cells,
       reviewHeight,
-      height: input.typography.lineHeight + reviewHeight,
+      // Unseen wrapped rows use a monospace estimate; materialization replaces
+      // it with the exact fragment count without changing source identity.
+      height:
+        input.typography.lineHeight *
+          Math.max(
+            1,
+            ...cells.map((cell) => {
+              return cell && input.wrapLines
+                ? Math.ceil(estimatedDisplayOffset(cell.content) / columns)
+                : 1;
+            }),
+          ) +
+        reviewHeight,
     };
   });
+}
+
+// Use the same tab expansion and column count for estimated heights and anchors.
+function estimatedDisplayOffset(text: string): number {
+  return text.length + (text.match(/\t/g)?.length ?? 0) * 3;
+}
+
+function estimatedVisualLine(cell: DiffCell, sourceOffset: number): number {
+  return Math.floor(
+    estimatedDisplayOffset(cell.content.slice(0, sourceOffset)) /
+      (cell.estimatedWrapColumns ?? Infinity),
+  );
+}
+
+function estimatedFragment(cell: DiffCell, visualIndex: number, lineHeight: number) {
+  const columns = cell.estimatedWrapColumns ?? Infinity;
+  const lastIndex = Math.max(0, Math.ceil(estimatedDisplayOffset(cell.content) / columns) - 1);
+  const index = Math.min(visualIndex, lastIndex);
+  const displayOffset = index === 0 ? 0 : index * columns;
+  let start = Math.min(displayOffset, cell.content.length);
+  if (cell.content.includes("\t")) {
+    let offset = 0;
+    start = 0;
+    while (start < cell.content.length && offset < displayOffset) {
+      offset += cell.content[start] === "\t" ? 4 : 1;
+      start += 1;
+    }
+  }
+  return { start, top: index * lineHeight };
+}
+
+// A resize can move the anchor outside the old window. Measure that row in the
+// same pass: estimated columns cannot identify exact shaped-text fragments.
+function containsMaterializationAnchor(
+  input: BuildDiffDocumentModelInput,
+  path: string,
+  cells: DiffLineRow["cells"],
+): boolean {
+  const anchor = input.materializationAnchor;
+  return (
+    anchor?.kind === "text" &&
+    anchor.path === path &&
+    cells.some((cell) => cell && sameSourceIdentity(cell.sourceIdentity, anchor.sourceIdentity))
+  );
 }
 
 function intersectsMaterializationWindow(
@@ -437,16 +533,17 @@ function intersectsMaterializationWindow(
 
 function hasMeasuredFileRows(model: DiffDocumentModel, file: DiffFileSection): boolean {
   if (file.isCollapsed) return false;
-  return model.rows.slice(file.rowStart, file.rowEnd).every((row) => {
+  return model.rows.slice(file.rowStart, file.rowEnd).some((row) => {
     if (row.kind !== "line") return true;
-    return row.cells.every((cell) => !cell || cell.fragments.length > 0);
+    return row.cells.some((cell) => cell && cell.fragments.length > 0);
   });
 }
 
 function indexReusableModels(
   models: readonly DiffDocumentModel[] | undefined,
 ): ReusableModelIndex[] {
-  return (models ?? []).map((model) => {
+  // The latest model includes text prepared by later scroll windows.
+  return (models ?? []).toReversed().map((model) => {
     const filesBySource = new Map<BuildDiffDocumentModelInput["files"][number], DiffFileSection>();
     const measuredFiles = new Set<DiffFileSection>();
     for (const file of model.files) {
@@ -554,14 +651,31 @@ export function measureFragments(input: {
     return [createFragment(graphemes, 0, graphemes.length, 0, input.lineHeight, input.measureText)];
   }
   const fragments: DiffFragment[] = [];
+  const displayGraphemes = graphemes.map((grapheme) => grapheme.text);
+  const measureWidth =
+    input.measureText.measureWidth?.bind(input.measureText) ??
+    ((slice: readonly string[]) => advancesFor(input.measureText)(slice).at(-1) ?? 0);
+  // Joining/ligatures can make a longer prefix narrower. Preserve the existing
+  // search order for those runs; changing the probes can change their breaks.
+  const canBoundSearch = !requiresShaping(input.text);
   let graphemeIndex = 0;
   while (graphemeIndex < graphemes.length) {
     let low = graphemeIndex + 1;
-    let high = graphemes.length;
+    // A small first probe finishes short lines in one query. Grow it only when
+    // it fits, so narrow wrapping never repeatedly measures a huge line's tail.
+    let high = canBoundSearch ? Math.min(graphemes.length, graphemeIndex + 64) : graphemes.length;
     let fitting = low;
+    if (canBoundSearch) {
+      while (measureWidth(displayGraphemes.slice(graphemeIndex, high)) <= input.availableWidth) {
+        fitting = high;
+        low = high + 1;
+        if (high === graphemes.length) break;
+        high = Math.min(graphemes.length, graphemeIndex + (high - graphemeIndex) * 2);
+      }
+    }
     while (low <= high) {
       const middle = (low + high) >>> 1;
-      const width = measureGraphemeSlice(graphemes, graphemeIndex, middle, input.measureText).width;
+      const width = measureWidth(displayGraphemes.slice(graphemeIndex, middle));
       if (width <= input.availableWidth || middle === graphemeIndex + 1) {
         fitting = middle;
         low = middle + 1;
@@ -761,17 +875,27 @@ export function captureScrollAnchor(
   }
   const textY = Math.max(0, Math.min(scrollTop - row.top, row.height - row.reviewHeight));
   const visualIndex = Math.max(0, Math.floor(textY / model.lineHeight));
-  let cellIndex = row.cells.findIndex((cell) => Boolean(cell?.fragments[visualIndex]));
+  let cellIndex = row.cells.findIndex(
+    (cell) =>
+      cell &&
+      (cell.fragments.length > 0
+        ? Boolean(cell.fragments[visualIndex])
+        : estimatedFragment(cell, visualIndex, model.lineHeight).top ===
+          visualIndex * model.lineHeight),
+  );
   if (cellIndex < 0) cellIndex = row.cells.findIndex((cell) => cell !== null);
   const cell = row.cells[cellIndex];
   if (!cell) return { kind: "header", path: file.path, viewportDelta: row.top - scrollTop };
-  const fragment = cell.fragments[Math.min(cell.fragments.length - 1, visualIndex)];
-  const anchorY = row.top + (fragment?.top ?? 0);
+  const fragment =
+    cell.fragments.length > 0
+      ? cell.fragments[Math.min(cell.fragments.length - 1, visualIndex)]!
+      : estimatedFragment(cell, visualIndex, model.lineHeight);
+  const anchorY = row.top + fragment.top;
   return {
     kind: "text",
     path: file.path,
     sourceIdentity: cell.sourceIdentity,
-    cellOffset: fragment?.start ?? 0,
+    cellOffset: fragment.start,
     viewportDelta: anchorY - scrollTop,
   };
 }
@@ -797,8 +921,10 @@ export function resolveScrollAnchor(model: DiffDocumentModel, anchor: DiffScroll
   const fragment =
     cell.fragments.find(
       (candidate) => candidate.start <= anchor.cellOffset && anchor.cellOffset < candidate.end,
-    ) ?? cell.fragments.at(-1);
-  return Math.max(0, row.top + (fragment?.top ?? 0) - anchor.viewportDelta);
+    ) ??
+    cell.fragments.at(-1) ??
+    estimatedFragment(cell, estimatedVisualLine(cell, anchor.cellOffset), model.lineHeight);
+  return Math.max(0, row.top + fragment.top - anchor.viewportDelta);
 }
 
 export function resolveRelayoutScrollTop(

@@ -4,6 +4,9 @@ Paseo is a client-server system for monitoring and controlling local AI coding a
 
 Your code never leaves your machine. Paseo is local-first.
 
+Daemon-owned outbound connections and routed API scope ownership are described in
+[Connected hosts](connected-hosts.md).
+
 ## System overview
 
 ```
@@ -54,6 +57,18 @@ The heart of Paseo. A Node.js process that:
 
 All paths are under `packages/server/src/`.
 
+Desktop and CLI import server capabilities through explicit package subpaths such as
+`@getpaseo/server/daemon-control`, `/configuration`, and `/process`. The root export
+loads daemon bootstrap eagerly, even when a caller only uses a path or process helper.
+Keep process-management and configuration dependencies independent of bootstrap and
+WebSocket message schemas. Shared configuration schemas belong in protocol leaf modules;
+`messages` imports and re-exports them. This prevents every supervising process from
+retaining the daemon's runtime and wire-schema allocations. The server export tests guard
+these dependency trees with tree-shaking disabled to match unbundled production imports.
+
+Terminals do not live in the daemon process: their PTYs run in a detached terminal worker that
+survives daemon restarts, crashes and upgrades. See [terminal-worker.md](terminal-worker.md).
+
 Project identity is daemon-global rather than session-owned. After registry bootstrap, the daemon's
 project Git observer keeps one non-recursive watch on each lexically equivalent active project root
 and listens only for the root `.git` entry, with a slow rescan as a missed-event fallback. It runs
@@ -61,6 +76,13 @@ for empty projects and without connected clients, then fans metadata changes thr
 server to capability-aware sessions. It deliberately does not use the broad recursive working-tree
 watcher or the per-session Git observer: those are checkout/status mechanisms and intentionally do
 not retain non-Git directories.
+
+Workspace git and forge runtime data belongs to one daemon-level, directory-keyed store.
+Workspace descriptors, checkout diff subscriptions, and script metadata read the last known
+snapshot from that store, so reconnecting clients receive it before refresh completes.
+Refcounted git watches feed the store through snapshot-updated events; their lifetime controls
+refresh only. Session cleanup and workspace archive retain the data. Removing the final active
+workspace for a directory clears it. The store lives in memory and resets on daemon restart.
 
 **Key modules:**
 
@@ -94,9 +116,10 @@ facade. App and CLI may import the low-level driver from
 `@getpaseo/client/internal/daemon-client` during migration, while new SDK-shaped
 code imports from `@getpaseo/client`.
 
-`PaseoApi` is the capability-only boundary over workspaces, agents, providers, and config.
+`PaseoApi` is the capability-only boundary over workspaces, agents, terminals, providers, and config.
 `PaseoClient` adds connection lifecycle. App plugin surfaces borrow an API over their selected
-host's client; plugin subprocesses use the same facade over a host-owned IPC transport.
+host's client; plugin subprocesses use the same facade over a host-owned IPC transport. Protocol capability ownership and subscription lifetimes follow
+[the client contract](protocol-compatibility.md#client-capability-ownership).
 
 ### `packages/app` — Mobile + web client (Expo)
 
@@ -144,7 +167,7 @@ traffic. Workspace assignments stay on the workspace directory sequence.
 Commander.js CLI with Docker-style commands. Common agent operations are also exposed at the top level (e.g. `paseo ls`, `paseo run`).
 
 - `paseo agent ls/run/import/attach/logs/stop/delete/send/inspect/wait/archive/reload/update/mode`
-- `paseo daemon start/stop/restart/status/pair/set-password`
+- `paseo daemon start/run/stop/restart/status/reload/config/pair/set-password`
 - `paseo terminal ls/create/capture/send-keys/kill`
 - `paseo script ls/start/stop`
 - `paseo schedule create/ls/inspect/update/pause/resume/run-once/logs/delete`
@@ -162,9 +185,9 @@ Communicates with the daemon via the same WebSocket protocol as the app.
 
 Enables remote access when the daemon is behind a firewall.
 
-- Curve25519 establishes the relay-session secret; NaCl `box` protects each payload with XSalsa20-Poly1305
+- Updated peers negotiate a Noise `NK` session with per-record counters; peers on either side that predate it fall back to the legacy NaCl `box` construction. [docs/relay-endpoint-security.md](relay-endpoint-security.md) owns the mapping, negotiation, and the `daemon.relay.requireProtectedSecurity` flag
 - The relay is zero-knowledge — it routes encrypted bytes and cannot read content
-- Client and daemon channels with identical API (`createClientChannel`, `createDaemonChannel`)
+- Client and daemon channels with identical API (`openClientSecureChannel`, `openDaemonSecureChannel`)
 - Pairing via QR code transfers the daemon's public key to the client
 - New homes keep relay disabled until pairing consent. `DaemonConfigStore` persists the desired state, while the relay runtime starts or stops the outbound transport live; pairing reads that current state instead of a startup snapshot.
 - Optional E2EE capability negotiation preserves application frame kind: text plaintext uses base64 ciphertext text frames, while binary plaintext uses raw ciphertext binary frames; mixed-version peers remain base64-only
@@ -238,11 +261,22 @@ Server → Client:  status message with payload { status: "server_info",
                     serverId, hostname, version, capabilities?, features }
 ```
 
-There is no dedicated welcome message; the server emits a `status` session message after accepting the hello, then begins streaming. The session stores client capabilities from the hello and rehydrates them on reconnect, so the wire boundary can ask one question: `session.supports(...)`.
+There is no dedicated welcome message; the server emits one initial `status.server_info` after
+accepting hello. Modern clients negotiate `owned_subscriptions` against
+`features.ownedSubscriptions`. Connecting or attaching a local listener creates no application-data
+demand. A list is a snapshot; adding `subscribe: {}` creates an independent server ID. The client
+correlates the initial reply by request ID, then routes updates by subscription ID.
+
+A logical Session can contain several physical sockets. Each socket owns its capabilities,
+subscriptions and ongoing operations; the final JSON/binary send boundary requires that source's
+request or subscription provenance. Domain modules own filtering, bootstrap and resource teardown.
+The shared ownership boundary only tracks source and lifetime. Releasing a subscription acknowledges
+its teardown; reconnect creates new server IDs for surviving client handles. See
+[protocol compatibility](protocol-compatibility.md) for the legacy boundary.
 
 **Top-level WS envelopes** are `hello`, `recording_state`, `ping`/`pong`, and `session` (which wraps the rich union of session messages).
 
-Client liveness checks use the top-level JSON `ping`/`pong` envelope, not a session RPC or RFC6455 control ping. Current clients ping every 10 seconds, beginning one interval after connecting. The first ping claims an application-ownership lease for that physical socket, all later inbound activity renews it, and the daemon forcibly terminates the socket if the lease expires. A legacy or raw socket that never sends an application ping never enters this lease and is not closed for omitting one. Session RPC timeouts are operation failures and must not be treated as proof that the socket is dead.
+Client liveness checks use the top-level JSON `ping`/`pong` envelope, not a session RPC or RFC6455 control ping. Current clients ping every 10 seconds, beginning one interval after connecting. The first ping claims an application-ownership lease for that physical socket, all later inbound activity renews it, and the daemon forcibly terminates the socket if the lease expires. A legacy or raw socket that never sends an application ping never enters this lease and is not closed for omitting one. Session RPC timeouts are operation failures, not proof that the socket is dead. A subscription bootstrap timeout closes its source to clear any unknown server-owned registration; the failed handle is released before other surviving handles reconnect.
 
 Every physical send path enforces an 8 MiB outbound high-water mark, including JSON broadcasts, binary terminal frames, and the encrypted relay adapter's asynchronous queue. This sits above the terminal stream's 4 MiB soft backpressure threshold, leaving room for snapshot catch-up before the hard cutoff. JSON is serialized once per broadcast after sockets already at the limit are removed, then its exact byte length is checked for every remaining socket. A frame that would cross the limit is not sent; that physical socket is forcibly terminated without disturbing other sockets attached to the same logical session. Multiple tabs and simultaneous direct and relay paths may legitimately share a client id.
 
@@ -296,7 +330,7 @@ messages or transfers.
 
 - WebSocket schemas are append-only. Add fields, do not remove fields, and never make optional fields required.
 - New wire enum values must be gated at serialization with `session.supports(CLIENT_CAPS.someCapability)`.
-- `Session` stores client capabilities from the `hello` handshake and rehydrates them on reconnect, so the wire boundary can ask one question: `session.supports(...)`.
+- Capabilities belong to the physical source socket. `session.supports(...)` reads the requesting or observing source at the domain projection boundary; one socket must not borrow a sibling's capabilities.
 
 Example: adding a new enum value
 
@@ -306,6 +340,40 @@ Example: adding a new enum value
 // 3. Keep the shared producer schema strict
 // 4. Gate the new emitted value: session.supports(CLIENT_CAPS.newThing) ? "new_value" : "old_value"
 ```
+
+### Creation ownership
+
+Creation is owned by the daemon across socket lifetimes. A workspace request can include
+its initial agent and prompt. Workspace readiness is published before provider startup;
+the app keeps its existing disk-ready navigation and observes the remaining creation.
+Callbacks do not advance the workflow. Resource reservations in acknowledgement are
+identities, not ready workspace records.
+
+The creation journal (`server/creation/`) owns identity and execution for both legacy and
+modern creation RPCs. Requesting progress never selects a different journal. Existing
+agent receipts are imported at this boundary; message delivery receipts remain separate.
+It keeps cumulative milestones and permanent IDs under an operation kind and idempotency
+key. Reconnect subscribes to that key; retries
+join active work or reuse committed stages. A persisted resource alone cannot prove
+that a provider accepted its initial prompt. Interrupted side effects with no conclusive
+receipt return an unknown outcome instead of being repeated.
+
+Agent registration commits creation. Rejecting the first prompt is a turn error on that
+agent; reporting creation failure leaves an orphaned agent and invites another Create.
+Receipt replay must not resend the prompt.
+
+`packages/client/src/creation/` owns capability selection and legacy orchestration.
+Callers always pass the initial prompt to agent creation. On an older host, the client
+adapts keyed creation to the legacy create/send sequence; it cannot continue that
+sequence after the client process disappears. Explicitly requested IDs or receipts
+that an old host cannot honor produce an unsupported error. Keep these adapters inside
+the client package, as an exception to the default no-fallback feature policy.
+
+Creation executes through the existing Session capabilities. Connection-owned delivery
+controls observation only: detaching a socket or cleaning up its Session does not cancel
+accepted creation. Updates require an explicit subscription and go only to that socket;
+reconnect uses the shared subscription owner. Legacy consumers, including Hub, keep their
+existing response contract.
 
 ## Agent lifecycle
 
@@ -417,12 +485,26 @@ $PASEO_HOME/
 ├── config.json                                 # Daemon config (mutable)
 ├── daemon-keypair.json                         # Daemon identity for relay/E2EE
 ├── push-tokens.json                            # Mobile push tokens
-├── paseo.sock / paseo.pid                      # Local IPC socket and pidfile
+├── paseo.pid                                   # Supervisor identity and published bound endpoint
 └── daemon.log                                  # Daemon trace logs (rotated)
 ```
+
+The supervisor alone publishes its ready worker's endpoint in `paseo.pid`, clears it before respawn, and fails if any worker exits before first readiness. CLI home selection trusts only that live record; config expresses desired state, never an endpoint fallback. POSIX home stop signals the captured supervisor without TCP. Windows graceful stop and ordinary RPCs trust the published endpoint. This metadata is not cryptographic listener ownership: edited endpoints, copied identities, PID reuse, and address takeover races remain outside that guarantee. A stale heartbeat never permits reclaiming a live lock.
+
+Worker restart retains supervisor arguments/environment and rereads the configuration file. Updating a package and observing its new worker version do not refresh the running supervisor code; the launcher owns full-process replacement. See [CLI lifecycle contracts](../public-docs/cli.md#daemon-management).
+
+## Outbound networking
+
+The daemon and its plugin processes honor `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`
+(including lowercase forms, which take precedence). Fetch and relay, Hub, and connected-host WebSockets
+share this policy. Loopback (`localhost`, `127.0.0.1`, `::1`) always goes direct.
+A proxy without a scheme uses HTTP. Invalid values and unsupported proxy schemes
+are treated as unset, with one warning naming the variable in `daemon.log`.
+Agent and terminal environments are unchanged. System proxy settings and SOCKS-only
+`ALL_PROXY` configurations are not supported.
 
 ## Deployment models
 
 1. **Local daemon** (default): `paseo daemon start` on `127.0.0.1:6767`
-2. **Managed desktop**: Electron app spawns daemon as subprocess, and stops it again on quit so that "restart the app" is a complete reset. Settings > Host > "Keep daemon running after quit" opts out. Only a daemon the desktop started is stopped — a daemon you started yourself with `paseo daemon start` is left alone (`paseo.pid` records `desktopManaged`).
+2. **Managed desktop**: Electron uses the server package’s local-instance lifecycle capability for sanitized launch, published readiness, and captured-PID stop. Only a matching `{pid, startedAt}` from a spawn in the current Desktop session authorizes automatic stop or binary replacement. Preexisting instances, including legacy `desktopManaged` records, are attach-only. Keep-running survivors attach in the next session. Explicit attached Stop requires a confirmation naming the captured home/PID. Ordinary Restart uses the worker RPC on every app platform.
 3. **Remote + relay**: Daemon behind firewall, relay bridges with E2E encryption

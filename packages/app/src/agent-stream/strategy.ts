@@ -1,6 +1,7 @@
 import type { ComponentType, ReactElement, ReactNode, RefObject } from "react";
 import type { StyleProp, ViewStyle } from "react-native";
 import type { StreamItem } from "@/types/stream";
+import type { ReadingRowReplacements } from "./reading-anchor";
 import { continuesResponse } from "./turn-membership";
 import type { StreamHistoryBoundary, StreamRenderSegments } from "./model";
 import type {
@@ -40,10 +41,24 @@ export interface StreamEdgeSlotProps {
   ListFooterComponentStyle?: StyleProp<ViewStyle>;
 }
 
+/**
+ * A caller that landed on one occurrence inside the message owns where the viewport
+ * settles. It resolved the occurrence against a specific row already, so it takes no
+ * row here and returns null once that row is gone.
+ */
+export interface ScrollToMessageOccurrence {
+  signal: AbortSignal;
+  targetTop(): number | null;
+}
+
 export interface StreamViewportHandle {
+  /** Give keyboard navigation back to the scrolling surface on web. */
+  focus?: () => void;
   scrollToBottom: (reason?: BottomAnchorLocalRequest["reason"]) => void;
   prepareForViewportChange: () => void;
-  scrollToMessage?: (itemId: string) => void;
+  /** Stop following output so the rows on screen stay put while rows below them open or close. */
+  holdReadingPosition: () => void;
+  scrollToMessage?: (messageId: string, occurrence?: ScrollToMessageOccurrence) => void;
 }
 
 export interface StreamSegmentRenderers {
@@ -64,6 +79,8 @@ export interface StreamRenderInput {
   segments: StreamRenderSegments;
   historyRowRevision?: StreamHistoryRowRevision;
   liveHeadRowRevision?: unknown;
+  /** Presentation rows replaced by another row after history is folded. */
+  readingRowReplacements?: ReadingRowReplacements;
   boundary: StreamHistoryBoundary;
   renderers: StreamSegmentRenderers;
   listEmptyComponent: ReactNode;
@@ -82,6 +99,8 @@ export interface StreamRenderInput {
   listStyle: StyleProp<ViewStyle>;
   baseListContentContainerStyle: StyleProp<ViewStyle>;
   forwardListContentContainerStyle: StyleProp<ViewStyle>;
+  // The chat column's max width. The web viewport estimates unmeasured row heights with it.
+  contentMaxWidth: number;
 }
 
 export interface ResolveStreamRenderStrategyInput {

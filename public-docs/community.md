@@ -10,6 +10,12 @@ category: Getting started
 
 These projects are related to Paseo and built by the community.
 
+## Plugins
+
+Browse the [plugin registry](/plugins) for reviewed community plugins. To share your own, follow
+[Publish a plugin](/docs/plugins/publishing) for package preparation and submission.
+Plugins run unsandboxed; read their listing and source before installing.
+
 ## Tools and integrations
 
 | Project                                                                                      | What it does                                                                                                                         |
@@ -23,7 +29,8 @@ These projects are related to Paseo and built by the community.
 
 ## Hosting and infrastructure
 
-| Project                                                            | What it does                                                                                         |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| [Paseo Self-hosted](https://github.com/blockfeed/paseo-selfhosted) | Packages the Paseo web UI and a local daemon as a Docker deployment.                                 |
-| [Devbox Fleet](https://github.com/omrihaviv/devbox-fleet)          | Provisions and maintains per-developer GCP devboxes with Paseo, coding agents, and Tailscale access. |
+| Project                                                                     | What it does                                                                                                                                                             |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [Paseo Self-hosted](https://github.com/blockfeed/paseo-selfhosted)          | Packages the Paseo web UI and a local daemon as a Docker deployment.                                                                                                     |
+| [Devbox Fleet](https://github.com/omrihaviv/devbox-fleet)                   | Provisions and maintains per-developer GCP devboxes with Paseo, coding agents, and Tailscale access.                                                                     |
+| [Paseo Vercel Sandbox](https://github.com/vercel-labs/paseo-vercel-sandbox) | Creates persistent Vercel Sandboxes running a Paseo daemon with Codex, Claude Code, OpenCode, or Pi through Vercel AI Gateway. Pair each sandbox as a remote Paseo host. |

@@ -78,6 +78,71 @@ function modelInput(
 }
 
 describe("diff document workspace cache", () => {
+  it("keeps text prepared in each visited window of the same file", () => {
+    const cache = createDiffDocumentWorkspaceCache();
+    const source = diffFile();
+    source.hunks[0]!.lines = Array.from({ length: 100 }, (_, index) => ({
+      type: "add",
+      content: `const value${index} = ${index};`,
+    }));
+    const { measureText, stats } = countingMeasurer();
+    const input = modelInput([source], measureText);
+    for (const top of [30, 300, 600]) {
+      cache.buildModel({ ...input, materializationWindow: { top, height: 54 } });
+    }
+    stats.calls = 0;
+    cache.buildModel({ ...input, materializationWindow: { top: 300, height: 54 } });
+    expect(stats.calls).toBe(0);
+  });
+
+  it("materializes a new anchor when the viewport window is unchanged", () => {
+    const cache = createDiffDocumentWorkspaceCache();
+    const source = diffFile();
+    source.hunks[0]!.lines = Array.from({ length: 100 }, () => ({
+      type: "add" as const,
+      content: "x".repeat(200),
+    }));
+    const { measureText } = countingMeasurer();
+    const input = modelInput([source], measureText, {
+      wrapLines: true,
+      materializationWindow: { top: 30, height: 54 },
+    });
+    const first = cache.buildModel(input);
+    const anchored = cache.buildModel({
+      ...input,
+      materializationAnchor: {
+        kind: "text",
+        path: source.path,
+        sourceIdentity: { hunkIndex: 0, lineIndex: 50, side: "new" },
+        cellOffset: 90,
+        viewportDelta: -2,
+      },
+    });
+    const firstRow = first.rows[50]!;
+    const anchoredRow = anchored.rows[50]!;
+    expect(firstRow.kind === "line" && firstRow.cells[0]!.fragments.length).toBe(0);
+    expect(anchoredRow.kind === "line" && anchoredRow.cells[0]!.fragments.length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it("retains text cells for unchanged files when another file changes", () => {
+    const cache = createDiffDocumentWorkspaceCache();
+    const { measureText } = countingMeasurer();
+    const files = [diffFile(), { ...diffFile(), path: "b.ts" }];
+    const first = cache.buildModel(modelInput(files, measureText));
+    const replacement = structuredClone(files[0]!);
+    replacement.hunks[0]!.lines[0]!.content = "changed text";
+    const next = cache.buildModel(modelInput([replacement, files[1]!], measureText));
+    const oldRow = first.rows[first.files[1]!.rowStart]!;
+    const nextRow = next.rows[next.files[1]!.rowStart]!;
+    expect(oldRow.kind).toBe("line");
+    expect(nextRow.kind).toBe("line");
+    if (oldRow.kind !== "line" || nextRow.kind !== "line") throw new Error("Missing file text");
+    expect(nextRow.cells).toBe(oldRow.cells);
+    expect(next.files[0]!.file).toBe(replacement);
+  });
+
   it("reuses measured rows until a model-building input changes", () => {
     const cache = createDiffDocumentWorkspaceCache();
     const files = [diffFile()];
@@ -115,7 +180,7 @@ describe("diff document workspace cache", () => {
 
     stats.calls = 0;
     cache.buildModel({ ...input, files: [...files] });
-    expect(stats.calls).toBeGreaterThan(0);
+    expect(stats.calls).toBe(0);
   });
 
   it("bounds retained geometry variants for one diff payload", () => {
@@ -152,7 +217,7 @@ describe("diff document workspace cache", () => {
     const files = [diffFile(), { ...diffFile(), path: "src/b.ts" }];
     const { measureText, stats } = countingMeasurer();
     const first = cache.buildModel(
-      modelInput(files, measureText, { materializationWindow: { top: 0, height: 20 } }),
+      modelInput(files, measureText, { materializationWindow: { top: 30, height: 20 } }),
     );
     const firstCalls = stats.calls;
     const secondFile = first.files[1]!;

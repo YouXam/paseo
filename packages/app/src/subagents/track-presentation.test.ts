@@ -13,12 +13,18 @@ function row(
 ): PaseoSubagentRow {
   return {
     kind: "paseo",
+    address: overrides.address ?? { serverId: "server-1", agentId: overrides.id },
     id: overrides.id,
     provider: overrides.provider ?? "codex",
     title: overrides.title ?? `Agent ${overrides.id}`,
     description: null,
     subtitle: null,
     status: overrides.status ?? "idle",
+    turn:
+      overrides.turn ??
+      (overrides.status === "running"
+        ? { phase: "open", turnId: null, startedAt: null, cancellationRequestId: null }
+        : { phase: "idle", cancellationRequestId: null }),
     requiresAttention: overrides.requiresAttention ?? false,
     createdAt: overrides.createdAt ?? new Date("2026-04-20T00:00:00.000Z"),
   };

@@ -1,3 +1,5 @@
+import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
+import { SessionDelivery } from "./session/owned-subscriptions/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Server as HTTPServer } from "http";
 import type pino from "pino";
@@ -116,6 +118,7 @@ function createServer(agentManagerOverrides?: Record<string, unknown>) {
     null,
     { allowedOrigins: new Set() },
     createWorkspaceAutoNameStub(),
+    createWorkspaceRuntimeStore(),
     undefined,
     undefined,
     undefined,
@@ -191,9 +194,15 @@ function connectClient(
   options: { subscribed?: boolean } = {},
 ) {
   const ws = createOpenSocket();
+  const delivery = new SessionDelivery(() => {});
+  delivery.attach(ws, false);
   asInternals<WebSocketServerInternals>(server).sessions.set(ws, {
     kind: "trusted",
-    session: createSessionWithActivity(activity, options.subscribed ?? true),
+    session: {
+      ...createSessionWithActivity(activity, options.subscribed ?? true),
+      delivery,
+      wantsSourceNotification: () => true,
+    },
     clientId: "client-test",
     appVersion: null,
     connectionLogger: createLogger(),

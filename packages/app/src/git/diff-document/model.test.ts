@@ -10,7 +10,7 @@ import {
   resolveRelayoutScrollTop,
   shouldApplyRelayoutScroll,
 } from "./model";
-import type { BuildDiffDocumentModelInput, TextMeasurer } from "./types";
+import type { BuildDiffDocumentModelInput, DiffCell, TextMeasurer } from "./types";
 
 const measurer: TextMeasurer = { measure: (text) => Array.from(text).length * 10 };
 
@@ -71,6 +71,127 @@ function input(overrides: Partial<BuildDiffDocumentModelInput> = {}): BuildDiffD
 }
 
 describe("diff document model", () => {
+  it("preserves shaped wrap breaks when joining makes a longer prefix narrower", () => {
+    const measure = (text: string) => {
+      if (text === "لا") return 30;
+      if (text === "لام") return 15;
+      return text.length * 10;
+    };
+    const fragments = measureFragments({
+      text: "لام",
+      availableWidth: 20,
+      wrapLines: true,
+      lineHeight: 18,
+      measureText: { measure, measureWidth: (graphemes) => measure(graphemes.join("")) },
+    });
+    expect(fragments.map((fragment) => fragment.text)).toEqual(["ل", "ام"]);
+    expect(fragments.map((fragment) => fragment.width)).toEqual([10, 20]);
+  });
+
+  it("does not search wrap boundaries when the remaining text already fits", () => {
+    let widthQueries = 0;
+    const fragments = measureFragments({
+      text: "const answer = value + 1;",
+      availableWidth: 300,
+      wrapLines: true,
+      lineHeight: 18,
+      measureText: {
+        measure: measurer.measure,
+        measureWidth(graphemes) {
+          widthQueries++;
+          return graphemes.length * 10;
+        },
+      },
+    });
+    expect(fragments).toHaveLength(1);
+    expect(fragments[0]?.width).toBe(250);
+    expect(widthQueries).toBe(1);
+  });
+
+  it("builds character geometry only for displayed wrapped fragments", () => {
+    let advancedGraphemes = 0;
+    const measureWidth = (graphemes: readonly string[]) => graphemes.length * 10;
+    const measureText = {
+      // Whole-string widths need not match the chunked advance contract.
+      measure: () => 999,
+      measureWidth,
+      measureAdvances(graphemes: readonly string[]) {
+        advancedGraphemes += graphemes.length;
+        return graphemes.map((_, index) => (index + 1) * 10);
+      },
+    };
+    const text = "const next = (value) => value + 1;".repeat(4);
+    const fragments = measureFragments({
+      text,
+      availableWidth: 80,
+      wrapLines: true,
+      lineHeight: 18,
+      measureText,
+    });
+
+    expect(fragments.map((fragment) => fragment.text).join("")).toBe(text);
+    expect(fragments.every((fragment) => fragment.width <= 80)).toBe(true);
+    expect(fragments).toEqual(
+      measureFragments({
+        text,
+        availableWidth: 80,
+        wrapLines: true,
+        lineHeight: 18,
+        measureText: { measure: measurer.measure },
+      }),
+    );
+    expect(advancedGraphemes).toBe(text.length);
+  });
+
+  it("materializes only visible rows of a large file while preserving full horizontal extent", () => {
+    const source = file("large.ts");
+    source.hunks[0]!.lines = Array.from({ length: 1000 }, (_, index) => ({
+      type: "add",
+      content: index === 900 ? "a very wide offscreen line ".repeat(20) : `line ${index}`,
+      tokens: [{ text: `line ${index}`, style: null }],
+    }));
+    let advancedCharacters = 0;
+    const measureText: TextMeasurer = {
+      measure: (text) => text.length * 10,
+      measureAdvances(graphemes) {
+        advancedCharacters += graphemes.join("").length;
+        return graphemes.map((_, index) => (index + 1) * 10);
+      },
+    };
+    const base = input({ files: [source], wrapLines: false, viewportWidth: 300, measureText });
+    const eager = buildDiffDocumentModel(base);
+    advancedCharacters = 0;
+    const first = buildDiffDocumentModel({
+      ...base,
+      materializationWindow: { top: FILE_HEADER_HEIGHT, height: 54 },
+    });
+    expect(measuredFragments(first, source.path)).toBe(3);
+    expect(advancedCharacters).toBeLessThan(100);
+    expect(first.height).toBe(eager.height);
+    expect(first.files[0]!.contentWidth).toBe(eager.files[0]!.contentWidth);
+    const priorCells = firstLineCells(first, source.path);
+    advancedCharacters = 0;
+    const next = buildDiffDocumentModel({
+      ...base,
+      reuseFrom: [first],
+      materializationWindow: { top: FILE_HEADER_HEIGHT + 900 * 18, height: 54 },
+    });
+    expect(firstLineCells(next, source.path)).toBe(priorCells);
+    expect(next.rows[900]).toMatchObject({
+      kind: "line",
+      cells: [{ fragments: [{ text: source.hunks[0]!.lines[900]!.content }] }],
+    });
+    expect(advancedCharacters).toBeLessThan(600);
+    expect(next.height).toBe(eager.height);
+    advancedCharacters = 0;
+    buildDiffDocumentModel({
+      ...base,
+      reuseFrom: [next],
+      materializationWindow: { top: FILE_HEADER_HEIGHT, height: 54 },
+    });
+    expect(advancedCharacters).toBe(0);
+  });
+
   it("does not imperatively scroll for a no-op relayout", () => {
     expect(shouldApplyRelayoutScroll(320, 320)).toBe(false);
     expect(shouldApplyRelayoutScroll(320, 320.4)).toBe(false);
@@ -268,6 +389,7 @@ describe("diff document model", () => {
             commentId: null,
           },
           onStartComment() {},
+          onChangeEditorBody() {},
           onCancelEditor() {},
           onSaveEditor() {},
           onEditComment() {},
@@ -517,17 +639,119 @@ describe("diff document model", () => {
     expect(firstLineCells(last, "b.ts")).toBe(firstLineCells(first, "b.ts"));
   });
 
-  it("keeps wrapped geometry fully measured", () => {
+  it("replaces estimated wrapped heights through reuse and preserves the scroll anchor", () => {
+    const changed = fileWithChangedLine("x".repeat(100));
+    const files = [changed, file("later.ts")];
+    // Deliberately inaccurate M width makes the estimate differ from exact layout.
+    const measureText = {
+      measure: (text: string) => (text === "M" ? 5 : Array.from(text).length * 10),
+    };
+    const options = input({ files, measureText });
+    const first = buildDiffDocumentModel({
+      ...options,
+      materializationWindow: { top: 30, height: 1 },
+    });
+    const eager = buildDiffDocumentModel(options);
+    const exact = buildDiffDocumentModel({ ...options, reuseFrom: [first] });
+    expect(first.height).not.toBe(eager.height);
+    expect(exact.rows).toEqual(eager.rows);
+    expect(exact.height).toBe(eager.height);
+    expect(firstLineCells(exact, changed.path)).toBe(firstLineCells(first, changed.path));
+    const scrollTop = first.files[1]!.bodyTop + 3;
+    const nextScrollTop = resolveRelayoutScrollTop(first, exact, scrollTop);
+    expect(nextScrollTop).toBe(exact.files[1]!.bodyTop + 3);
+    expect(captureScrollAnchor(exact, nextScrollTop)).toEqual(
+      captureScrollAnchor(first, scrollTop),
+    );
+  });
+
+  it("preserves the wrapped source offset when resize leaves the anchor outside the window", () => {
+    const source = file();
+    source.hunks[0]!.lines = Array.from({ length: 200 }, () => ({
+      type: "add" as const,
+      content: "x".repeat(200),
+    }));
+    const options = input({ files: [source], viewportWidth: 500 });
+    const before = buildDiffDocumentModel(options);
+    const scrollTop = before.rows[100]!.top + 36;
+    const anchor = captureScrollAnchor(before, scrollTop)!;
+    expect(anchor).toMatchObject({ kind: "text", cellOffset: 90 });
+    const resizedOptions = { ...options, viewportWidth: 180 };
+    const estimated = buildDiffDocumentModel({
+      ...resizedOptions,
+      materializationWindow: {
+        top: Math.floor(scrollTop / 800) * 800 - 800,
+        height: 2000,
+      },
+    });
+    const estimatedRow = estimated.rows[100]!;
+    expect(estimatedRow.kind === "line" && estimatedRow.cells[0]?.fragments).toEqual([]);
+    const restored = resolveRelayoutScrollTop(before, estimated, scrollTop);
+    const recaptured = captureScrollAnchor(estimated, restored)!;
+    expect(recaptured).toMatchObject({ kind: "text", cellOffset: 78 });
+
+    const materialized = buildDiffDocumentModel({
+      ...resizedOptions,
+      materializationWindow: { top: restored - 800, height: 2000 },
+      reuseFrom: [estimated],
+    });
+    const eager = buildDiffDocumentModel(resizedOptions);
+    const expected = resolveRelayoutScrollTop(before, eager, scrollTop);
+    expect(expected).toBe(28_938);
+    expect(Math.abs(restored - expected)).toBeLessThan(before.lineHeight);
+    expect(resolveRelayoutScrollTop(estimated, materialized, restored)).toBe(expected);
+  });
+
+  it("materializes the relayout anchor even when off-screen height estimates are inaccurate", () => {
+    const source = file();
+    source.hunks[0]!.lines = Array.from({ length: 200 }, () => ({
+      type: "add" as const,
+      content: "x".repeat(200),
+    }));
+    const options = input({ files: [source], viewportWidth: 500 });
+    const before = buildDiffDocumentModel(options);
+    const scrollTop = before.rows[100]!.top + 38;
+    const anchor = captureScrollAnchor(before, scrollTop)!;
+    const resizedOptions = {
+      ...options,
+      viewportWidth: 180,
+      measureText: { measure: (text: string) => (text === "M" ? 5 : text.length * 10) },
+    };
+    const resized = buildDiffDocumentModel({
+      ...resizedOptions,
+      materializationWindow: { top: scrollTop - 800, height: 2000 },
+      materializationAnchor: anchor,
+    });
+    const row = resized.rows[100]!;
+    expect(row.kind === "line" && row.cells[0]!.fragments.length).toBeGreaterThan(0);
+    const restored = resolveRelayoutScrollTop(before, resized, scrollTop);
+    const materialized = buildDiffDocumentModel({
+      ...resizedOptions,
+      materializationWindow: { top: restored - 800, height: 2000 },
+      materializationAnchor: captureScrollAnchor(resized, restored),
+      reuseFrom: [resized],
+    });
+    const nextScrollTop = resolveRelayoutScrollTop(resized, materialized, restored);
+    const nextAnchor = captureScrollAnchor(materialized, nextScrollTop);
+    // Offset 90 belongs to the fragment beginning at 78 after narrowing.
+    expect(nextAnchor).toMatchObject({ kind: "text", cellOffset: 78, viewportDelta: -2 });
+    expect(nextScrollTop).toBe(resolveScrollAnchor(materialized, anchor));
+  });
+
+  it("materializes wrapped text only inside the window", () => {
     const model = buildDiffDocumentModel(
       input({
         files: [file("a.ts"), file("b.ts")],
         wrapLines: true,
-        materializationWindow: { top: 0, height: FILE_HEADER_HEIGHT },
+        materializationWindow: { top: FILE_HEADER_HEIGHT, height: 1 },
       }),
     );
 
     expect(measuredFragments(model, "a.ts")).toBeGreaterThan(0);
-    expect(measuredFragments(model, "b.ts")).toBeGreaterThan(0);
+    expect(measuredFragments(model, "b.ts")).toBe(0);
+    expect(
+      model.rows.filter((row) => row.kind === "line" && row.cells.some(hasFragments)),
+    ).toHaveLength(1);
   });
 });
 
@@ -669,9 +893,14 @@ function reviewActionsWithEditor(
     commentsByTarget: new Map(),
     editor: target ? { target, body: "", commentId: null } : null,
     onStartComment() {},
+    onChangeEditorBody() {},
     onCancelEditor() {},
     onSaveEditor() {},
     onEditComment() {},
     onDeleteComment() {},
   };
+}
+
+function hasFragments(cell: DiffCell | null): boolean {
+  return cell !== null && cell.fragments.length > 0;
 }

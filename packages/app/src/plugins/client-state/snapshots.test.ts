@@ -3,6 +3,8 @@ import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
 import { createPluginAgentSnapshot, createPluginWorkspaceSnapshot } from "./snapshots";
 
 const workspace: WorkspaceDescriptor = {
+  createdAt: null,
+  lastUserMessageAt: null,
   id: "workspace-1",
   projectId: "project-1",
   projectDisplayName: "Paseo",
@@ -25,7 +27,7 @@ const agent: Agent = {
   id: "agent-1",
   provider: "codex",
   status: "running",
-  activeTurn: null,
+  turn: { phase: "idle", cancellationRequestId: null },
   createdAt: new Date("2026-08-16T10:01:00.000Z"),
   updatedAt: new Date("2026-08-16T10:02:00.000Z"),
   lastUserMessageAt: null,

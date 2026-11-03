@@ -17,7 +17,7 @@ function createAgent(id: string): Agent {
     id,
     provider: "claude",
     status: "running",
-    activeTurn: { turnId: "turn-1", startedAt: now },
+    turn: { phase: "open", turnId: "turn-1", startedAt: now, cancellationRequestId: null },
     createdAt: now,
     updatedAt: now,
     lastUserMessageAt: now,
@@ -175,7 +175,7 @@ describe("deriveAgentScreenViewState", () => {
     expect(sync.ui).toBe("overlay");
   });
 
-  it("uses silent catching-up state for already-hydrated agents", () => {
+  it("shows updating status for already-hydrated agents", () => {
     const memory = createBaseMemory({
       hasRenderedReady: true,
       lastReadyAgent: createAgent("agent-1"),
@@ -190,7 +190,7 @@ describe("deriveAgentScreenViewState", () => {
     const ready = expectReadyState(result.state);
     const sync = expectCatchingUpSync(ready);
 
-    expect(sync.ui).toBe("silent");
+    expect(sync.ui).toBe("status");
   });
 
   it("keeps hydrated history visible while reconnect revalidation and visibility catch-up overlap", () => {
@@ -209,7 +209,7 @@ describe("deriveAgentScreenViewState", () => {
     const ready = expectReadyState(result.state);
     const sync = expectCatchingUpSync(ready);
 
-    expect(sync.ui).toBe("silent");
+    expect(sync.ui).toBe("status");
   });
 
   it("keeps already-hydrated history visible while a newly visible agent catches up", () => {
@@ -228,7 +228,7 @@ describe("deriveAgentScreenViewState", () => {
     const ready = expectReadyState(result.state);
     const sync = expectCatchingUpSync(ready);
 
-    expect(sync.ui).toBe("silent");
+    expect(sync.ui).toBe("status");
   });
 
   it("keeps hydrated history readable after a visibility catch-up error", () => {
@@ -422,6 +422,23 @@ describe("deriveAgentScreenViewState", () => {
     expect(result.memory.lastReadyAgent).toBeNull();
   });
 
+  it.each(["error", "retrying"] as const)("shows archived history sync %s", (status) => {
+    const result = deriveAgentScreenViewState({
+      input: {
+        ...createBaseInput(),
+        agent: createAgent("agent-1"),
+        isArchived: true,
+        hasHydratedHistoryBefore: true,
+        visibilityCatchUpStatus: status,
+      },
+      memory: createBaseMemory(),
+    });
+    expect(expectReadyState(result.state).sync).toEqual({
+      status: "sync_error",
+      isRetrying: status === "retrying",
+    });
+  });
+
   it("renders an archived agent before provider history is initialized", () => {
     const result = deriveAgentScreenViewState({
       input: {
@@ -607,7 +624,7 @@ describe("deriveAgentScreenViewState", () => {
     const ready = expectReadyState(result.state);
     const sync = expectCatchingUpSync(ready);
 
-    expect(sync.ui).toBe("silent");
+    expect(sync.ui).toBe("status");
     expect(result.memory.hadInitialSyncFailure).toBe(false);
   });
 });

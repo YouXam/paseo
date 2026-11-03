@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "../support/fixtures";
 import { gotoAppShell, openSettings } from "../support/helpers/app";
 import { openSettingsSection } from "../support/helpers/settings";
+import { openWhatsNew, release, serveChangelog } from "../support/helpers/changelog";
 
 const DISCORD_DESTINATION =
   /^https:\/\/(?:discord\.gg\/jz8T2uahpH|discord\.com\/invite\/jz8T2uahpH)(?:[/?#]|$)/;
@@ -41,7 +42,7 @@ async function expectExternalPage(
   await popup.close();
 }
 
-test("opens troubleshooting, support, and release destinations", async ({ page }) => {
+test("opens troubleshooting and support destinations", async ({ page }) => {
   await gotoAppShell(page);
   await expect(page.getByTestId("sidebar-help")).toBeVisible();
 
@@ -62,16 +63,58 @@ test("opens troubleshooting, support, and release destinations", async ({ page }
     await closeSheet(page, "keyboard-shortcuts-dialog");
   });
 
-  await test.step("opens support and release pages", async () => {
+  await test.step("opens support pages", async () => {
     await openHelpMenu(page);
     await expectExternalPage(page, "sidebar-help-discord", DISCORD_DESTINATION);
 
     await openHelpMenu(page);
     await expectExternalPage(page, "sidebar-help-github", GITHUB_ISSUE_DESTINATION);
-
-    await openHelpMenu(page);
-    await expectExternalPage(page, "sidebar-help-changelog", CHANGELOG_DESTINATION);
   });
+});
+
+test("renders the changelog in the app and links the website", async ({ page }) => {
+  // A callout, a section name the app has never seen, and a fenced sample whose
+  // contents look like a release heading.
+  await serveChangelog(page, [
+    "# Changelog",
+    "",
+    "## 9.1.0 - 2026-03-04",
+    "",
+    "Headline release note.",
+    "",
+    "> [!WARNING]",
+    "> Read this before upgrading.",
+    "",
+    "### Sparkles",
+    "",
+    "- Added a brand new thing",
+    "",
+    "```md",
+    "## 0.0.0 - 1999-01-01",
+    "```",
+    "",
+    "## 9.0.0 - 2026-02-01",
+    "",
+    "### Fixed",
+    "",
+    "- Fixed an older thing",
+    "",
+  ]);
+  await gotoAppShell(page);
+
+  const sheet = await openWhatsNew(page);
+  const latest = release(sheet, "9.1.0");
+
+  await expect(latest.getByText("March 4, 2026", { exact: true })).toBeVisible();
+  await expect(latest.getByText("Headline release note.")).toBeVisible();
+  await expect(latest.getByText("Read this before upgrading.")).toBeVisible();
+  await expect(latest.getByText("Sparkles", { exact: true })).toBeVisible();
+  await expect(latest.getByText("Added a brand new thing")).toBeVisible();
+  await expect(release(sheet, "9.0.0")).toBeVisible();
+  await expect(release(sheet, "0.0.0")).toHaveCount(0);
+
+  await expectExternalPage(page, "changelog-open-website", CHANGELOG_DESTINATION);
+  await closeSheet(page, "changelog-sheet");
 });
 
 test("searches keyboard shortcuts from the sidebar help menu", async ({ page }) => {
@@ -112,6 +155,18 @@ test("keeps diagnostics available from Settings after globalizing the sheet", as
 test.describe("compact sidebar help", () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
+  test("footer buttons provide finger-sized targets and accept taps beyond the glyph", async ({
+    page,
+  }) => {
+    await gotoAppShell(page);
+    await openCompactSidebar(page);
+    await expectFingerSizedFooterTargets(page);
+    await tapHelpNearTargetEdge(page);
+    await expect(page.getByTestId("sidebar-help-menu")).toBeVisible();
+    await page.getByTestId("sidebar-help-diagnostics").click();
+    await expectDiagnosticReport(page);
+  });
+
   test("offers diagnostics without advertising disabled keyboard shortcuts", async ({ page }) => {
     await gotoAppShell(page);
     await page.getByRole("button", { name: "Open menu", exact: true }).click();
@@ -122,3 +177,29 @@ test.describe("compact sidebar help", () => {
     await expectDiagnosticReport(page);
   });
 });
+
+async function openCompactSidebar(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Open menu", exact: true }).click();
+  await expect(page.getByTestId("sidebar-footer-bottom-line")).toBeVisible();
+}
+
+const MIN_TARGET_SIZE = 44;
+
+async function expectFingerSizedFooterTargets(page: Page): Promise<void> {
+  const buttons = page.getByTestId("sidebar-footer-bottom-line").getByRole("button");
+  await expect(buttons).toHaveCount(5);
+  for (const button of await buttons.all()) {
+    const bounds = await button.boundingBox();
+    // Layout can report a 44pt box as 43.99999, so compare at a hundredth of a point.
+    expect(bounds?.width).toBeGreaterThanOrEqual(MIN_TARGET_SIZE - 0.01);
+    expect(bounds?.height).toBeGreaterThanOrEqual(MIN_TARGET_SIZE - 0.01);
+    // Glyphs stay at the composer toolbar size (some optically smaller); only the target grows.
+    const glyphWidth = await button.locator("svg").first().getAttribute("width");
+    expect(Number(glyphWidth)).toBeLessThanOrEqual(20);
+  }
+}
+
+async function tapHelpNearTargetEdge(page: Page): Promise<void> {
+  const button = page.getByRole("button", { name: "Help and support", exact: true });
+  await button.tap({ position: { x: 40, y: 40 } });
+}

@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
-import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
+import { connectToDaemon } from "../../utils/client.js";
+import { fetchAllAgents } from "../../utils/agent-directory.js";
 import type { CommandOptions, ListResult, OutputSchema, CommandError } from "../../output/index.js";
 import { collectMultiple } from "../../utils/command-options.js";
 import { isSameOrDescendantPath } from "../../utils/paths.js";
@@ -12,8 +13,9 @@ type FetchAgentsOptions = NonNullable<
 export function addLsOptions(cmd: Command): Command {
   return cmd
     .description("List agents. By default excludes archived agents.")
-    .option("-a, --all", "Include archived agents")
+    .option("-a, --all", "Include archived and background agents")
     .option("-g, --global", "List agents across all directories")
+    .option("--background", "Include background workspace agents")
     .option(
       "--label <key=value>",
       "Filter by label (can be used multiple times)",
@@ -104,26 +106,13 @@ function toListItem(agent: AgentSnapshotPayload): AgentListItem {
 
 export type AgentLsResult = ListResult<AgentListItem>;
 
-function daemonConnectionFailure(host: string, cause: unknown): CommandError {
-  const reason = cause instanceof Error ? cause.message : String(cause);
-  const isSsh = host.trim().startsWith("ssh://");
-  return {
-    code: "DAEMON_NOT_RUNNING",
-    message: `Cannot reach the daemon at ${host}: ${reason}`,
-    details: isSsh
-      ? "Start the Paseo daemon on the SSH host; SSH transport does not install or start it."
-      : [
-          "Start a local daemon with: paseo daemon start",
-          "To use another daemon, pass --host <host:port> or set PASEO_HOST.",
-        ].join("\n"),
-  };
-}
-
 export interface AgentLsOptions extends CommandOptions {
   /** -a: Include archived agents */
   all?: boolean;
   /** -g: List agents across all directories */
   global?: boolean;
+  /** --background: Include background workspace agents */
+  background?: boolean;
   /** Filter by specific status */
   status?: string;
   /** Filter by specific cwd */
@@ -148,7 +137,7 @@ function parseLabelFilters(labels: string[] | undefined): Record<string, string>
 }
 
 export function buildAgentLsFetchOptions(
-  options: Pick<AgentLsOptions, "all" | "global" | "label" | "thinking">,
+  options: Pick<AgentLsOptions, "all" | "global" | "background" | "label" | "thinking">,
 ): FetchAgentsOptions {
   const labelFilters = parseLabelFilters(options.label);
   const normalizedThinkingOptionId = options.thinking?.trim();
@@ -156,6 +145,9 @@ export function buildAgentLsFetchOptions(
 
   if (options.all) {
     daemonFilter.includeArchived = true;
+  }
+  if (options.background || options.all) {
+    daemonFilter.includeBackground = true;
   }
   if (Object.keys(labelFilters).length > 0) {
     daemonFilter.labels = labelFilters;
@@ -165,7 +157,7 @@ export function buildAgentLsFetchOptions(
   }
 
   const fetchOptions: FetchAgentsOptions = {};
-  if (!options.global) {
+  if (!options.global && !options.all) {
     fetchOptions.scope = "active";
   }
   if (Object.keys(daemonFilter).length > 0) {
@@ -174,25 +166,35 @@ export function buildAgentLsFetchOptions(
   return fetchOptions;
 }
 
+interface AgentLsClient {
+  fetchAgents(options?: FetchAgentsOptions): Promise<{
+    entries: { agent: AgentSnapshotPayload }[];
+    pageInfo: { nextCursor: string | null };
+  }>;
+  close(): Promise<void>;
+}
+
 /**
  * Agent ls command semantics:
  * - `paseo agent ls`    → active non-archived agents
  * - `paseo agent ls -g` → global non-archived agents
- * - `paseo agent ls -a` → active agents, including archived
+ * - `paseo agent ls -a` → all agents, including archived and background
  * - `paseo agent ls -ag` → global agents, including archived
  */
 export async function runLsCommand(
   options: AgentLsOptions,
   _command: Command,
 ): Promise<AgentLsResult> {
-  const host = getDaemonHost({ host: options.host });
+  return listAgents(options);
+}
 
-  let client;
-  try {
-    client = await connectToDaemon({ host: options.host });
-  } catch (err) {
-    throw daemonConnectionFailure(host, err);
-  }
+export async function listAgents(
+  options: AgentLsOptions,
+  connect: (
+    options: Parameters<typeof connectToDaemon>[0],
+  ) => Promise<AgentLsClient> = connectToDaemon,
+): Promise<AgentLsResult> {
+  const client = await connect({ target: options.daemonTarget });
 
   try {
     const normalizedThinkingOptionId = options.thinking?.trim();
@@ -205,8 +207,8 @@ export async function runLsCommand(
     }
 
     const labelFilters = parseLabelFilters(options.label);
-    const fetchPayload = await client.fetchAgents(buildAgentLsFetchOptions(options));
-    let agents = fetchPayload.entries.map((entry) => entry.agent);
+    const fetchOptions = buildAgentLsFetchOptions(options);
+    let agents = await fetchAllAgents(client, fetchOptions);
 
     // By default, exclude archived agents. `-a` includes them.
     if (!options.all) {

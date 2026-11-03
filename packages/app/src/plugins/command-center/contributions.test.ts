@@ -1,12 +1,13 @@
+import { PluginTranslationRuntime } from "@getpaseo/plugin/client/host";
 import { QueryClient } from "@tanstack/react-query";
 import { createPaseoApi, type PaseoApi } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import {
   defineRpc,
   type PluginAgentSnapshot,
-  type PluginCommandCenterItemContribution,
   type PluginWorkspaceSnapshot,
 } from "@getpaseo/plugin";
+import { type PluginCommandCenterItemContribution } from "@getpaseo/plugin/client";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { InstalledPlugin } from "../types";
@@ -60,10 +61,30 @@ function plugin(onAgentSelect: AgentCommandItem["onSelect"]): InstalledPlugin {
     id: "review",
     serverId: "host-1",
     clientBundle: "bundle",
+    lifetime: new AbortController(),
+    locale: "en",
+    i18n: new PluginTranslationRuntime({ getLocale: () => "en", subscribe: () => () => {} }),
+    paseo: createPaseoApi(
+      new DaemonClient({
+        url: "ws://127.0.0.1:1",
+        clientId: "plugin-command-test",
+        clientType: "cli",
+      }),
+    ),
+    subscribe: () => {
+      throw new Error("Subscriptions are not used here");
+    },
+    invoke: async (method: string, input: unknown) => {
+      expect(method).toBe("review.inspect");
+      return { value: inspect.input.parse(input).value + 1 };
+    },
     queryClient: new QueryClient(),
     cleanup: () => {},
-    surfaces: [{ id: "main", Component: () => null }],
-    sidebarItems: [],
+    settingsScreens: [],
+    surfaces: [{ id: "main", title: "Main", Component: () => null }],
+    sidebarItems: { header: [], footer: [] },
+    legacySidebarItems: [],
+    filePanels: [],
     workspacePanels: [
       {
         id: "details",
@@ -119,30 +140,14 @@ function stateSource() {
   };
 }
 
-function createRuntime(pluginId: string) {
-  const client = new DaemonClient({
-    url: "ws://127.0.0.1:1",
-    clientId: "plugin-command-test",
-    clientType: "cli",
-  });
-  return {
-    paseo: createPaseoApi(client),
-    invoke: async (method: string, input: unknown) => {
-      expect(pluginId).toBe("review");
-      expect(method).toBe("review.inspect");
-      return { value: inspect.input.parse(input).value + 1 };
-    },
-  };
-}
-
 describe("plugin Command Center contributions", () => {
   it("shows only contributions whose synchronous context exists", () => {
     const installed = plugin(() => undefined);
     const common = {
       plugins: [installed],
-      runtime: createRuntime,
       state: stateSource(),
       navigation: {
+        openSettings() {},
         openSurface() {},
         openWorkspacePanel() {},
         openAgentPanel() {},
@@ -185,14 +190,13 @@ describe("plugin Command Center contributions", () => {
       context.openSurface("main");
       context.openPanel("details", { location: "explorer" });
     });
-    const runtime = createRuntime("review");
     const actions = buildPluginCommandCenterContributions({
       plugins: [installed],
-      runtime: () => runtime,
       state: stateSource(),
       workspaceId: workspace.id,
       agentId: agent.id,
       navigation: {
+        openSettings() {},
         openSurface(pluginId, surfaceId) {
           opened.push(`${pluginId}/surface/${surfaceId}`);
         },
@@ -211,7 +215,8 @@ describe("plugin Command Center contributions", () => {
     await actions.find((action) => action.id === "review:agent")?.run();
 
     expect(rpcValue).toBe(5);
-    expect(receivedPaseo).toBe(runtime.paseo);
+    // Commands use the plugin's one client.
+    expect(receivedPaseo).toBe(installed.paseo);
     expect(opened).toEqual(["review/surface/main", "review/agent/details/agent-1/explorer"]);
   });
 
@@ -219,11 +224,11 @@ describe("plugin Command Center contributions", () => {
     expect(
       buildPluginCommandCenterContributions({
         plugins: [],
-        runtime: createRuntime,
         state: stateSource(),
         workspaceId: workspace.id,
         agentId: agent.id,
         navigation: {
+          openSettings() {},
           openSurface() {},
           openWorkspacePanel() {},
           openAgentPanel() {},

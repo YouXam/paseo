@@ -7,7 +7,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FormTextInput } from "@/components/ui/form-field";
-import { SettingsSection } from "@/screens/settings/settings-section";
+import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { getCloudSyncManager, getDefaultCloudSyncEndpoint } from "@/sync/manager";
 import { useCloudSyncState } from "@/sync/provider";
 import { settingsStyles } from "@/styles/settings";

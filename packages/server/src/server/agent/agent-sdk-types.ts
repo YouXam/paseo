@@ -1,14 +1,24 @@
 import type {
+  AgentFeature,
+  AgentFeatureSelect,
+  AgentFeatureToggle,
   AgentProviderNotice,
   AgentTaskItem,
   JsonValue,
   ProviderOptions,
   ToolPolicy,
 } from "@getpaseo/protocol/agent-types";
+import type { AgentMessage } from "@getpaseo/protocol/agent-message";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { PaseoToolCatalog } from "./tools/types.js";
 
-export type { AgentProviderNotice, AgentTaskItem };
+export type {
+  AgentFeature,
+  AgentFeatureSelect,
+  AgentFeatureToggle,
+  AgentProviderNotice,
+  AgentTaskItem,
+};
 
 export type AgentProvider = string;
 
@@ -156,29 +166,6 @@ export interface AgentCreateConfigUnattendedInput {
   availableModes: AgentMode[];
 }
 
-export interface AgentFeatureToggle {
-  type: "toggle";
-  id: string;
-  label: string;
-  description?: string;
-  tooltip?: string;
-  icon?: string;
-  value: boolean;
-}
-
-export interface AgentFeatureSelect {
-  type: "select";
-  id: string;
-  label: string;
-  description?: string;
-  tooltip?: string;
-  icon?: string;
-  value: string | null;
-  options: AgentSelectOption[];
-}
-
-export type AgentFeature = AgentFeatureToggle | AgentFeatureSelect;
-
 export interface AgentCapabilityFlags {
   [capability: string]: boolean | undefined;
   supportsStreaming: boolean;
@@ -221,7 +208,11 @@ export interface AgentSteerOptions extends AgentRunOptions {
   clearPendingPermissions?: boolean;
 }
 
-export type SteerResult = { status: "accepted" } | { status: "unavailable" };
+// providerMessageId names the steered message in the provider's own history, when the provider
+// mints one. Rewinding to the message needs it.
+export type SteerResult =
+  | { status: "accepted"; providerMessageId?: string }
+  | { status: "unavailable" };
 
 export interface SteerActiveTurnOptions extends AgentSteerOptions {
   expectedTurnId: string;
@@ -326,7 +317,10 @@ export type ToolCallDetail =
       subAgentType?: string;
       description?: string;
       childSessionId?: string;
-      log: string;
+      // COMPAT(subagent-log): added in v0.14.1, remove after 2027-04-30. Apps before v0.14.1
+      // require `log`; every producer sends it empty and carries the same tag. Optional here because
+      // protocol timeline items, where `log` is optional, flow into this type.
+      log?: string;
       actions?: Array<{
         index: number;
         toolName: string;
@@ -356,6 +350,8 @@ interface ToolCallBase {
   name: string;
   detail: ToolCallDetail;
   metadata?: Record<string, unknown>;
+  /** Set when the row is a delivered agent message rather than a provider tool call. */
+  agentMessage?: AgentMessage;
 }
 
 type ToolCallRunningTimelineItem = ToolCallBase & {
@@ -549,6 +545,7 @@ export interface AgentSlashCommand {
 }
 
 export interface ListImportableSessionsOptions {
+  providerOptions?: ProviderOptions;
   limit?: number;
   /** Optional case-insensitive descriptor search text. */
   query?: string;
@@ -626,6 +623,9 @@ export interface AgentSessionConfig {
 }
 
 export interface AgentLaunchContext {
+  /** Launch-only plugin MCP servers and their owners; never persisted. */
+  mcpServers?: Record<string, McpServerConfig>;
+  mcpServerOwners?: Record<string, string>;
   agentId?: string;
   env?: Record<string, string>;
   /**
@@ -641,12 +641,22 @@ export interface AgentCreateSessionOptions {
    * Defaults to true. Providers that cannot honor false should no-op.
    */
   persistSession?: boolean;
+  /**
+   * Model ids added by provider configuration (`models` / `additionalModels`).
+   * Providers that validate against runtime-advertised models must accept these.
+   */
+  configuredModelIds?: readonly string[];
 }
+
+/** What a resumed session is for: driving the agent, or reading what it already did. */
+export type AgentResumePurpose = "interactive" | "history";
 
 /** Runtime-only intent for a persisted-session resume. Never persist this option. */
 export interface AgentResumeSessionOptions {
   /** Defaults to interactive. History loading may be read-only for archived native sessions. */
-  purpose?: "interactive" | "history";
+  purpose?: AgentResumePurpose;
+  /** See AgentCreateSessionOptions.configuredModelIds. */
+  configuredModelIds?: readonly string[];
 }
 
 /**
@@ -657,11 +667,22 @@ export interface AgentPermissionResult {
   followUpPrompt?: AgentPromptInput;
 }
 
+export interface AgentUsageSession {
+  provider: string;
+  model?: string;
+  env: Record<string, string>;
+  sessionKey: string;
+}
+
 export interface AgentSession {
+  usageSession?(): AgentUsageSession | null;
   readonly provider: AgentProvider;
   readonly id: string | null;
   readonly capabilities: AgentCapabilityFlags;
   readonly features?: AgentFeature[];
+  /** New provider-owned rows to commit on registration. streamHistory must also
+   * replay them at their original timestamps; restored sessions omit old rows. */
+  readonly initialTimeline?: ImportedTimelineEntry[];
   run(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<AgentRunResult>;
   startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<{ turnId: string }>;
   steerActiveTurn?(prompt: AgentPromptInput, options: SteerActiveTurnOptions): Promise<SteerResult>;
@@ -676,6 +697,7 @@ export interface AgentSession {
     requestId: string,
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void>;
+  /** Null until a new provider process could resume this session; see docs/providers.md. */
   describePersistence(): AgentPersistenceHandle | null;
   /**
    * Resolve once every foreground turn that predates this call can no longer run or become active.
@@ -683,6 +705,10 @@ export interface AgentSession {
    * still uncertain.
    */
   interrupt(): Promise<void>;
+  /** True only when releasing this runtime loses no background work or pending replies.
+   * An optional additional veto: missing methods use daemon baseline eligibility;
+   * implemented checks that reject or return false keep the runtime resident. */
+  canStopRuntime?(): Promise<boolean>;
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
@@ -705,7 +731,7 @@ export interface AgentSession {
   } | null;
 }
 
-export type FetchCatalogOptions =
+export type FetchCatalogOptions = { providerOptions?: ProviderOptions } & (
   | {
       scope: "global";
       force: boolean;
@@ -714,7 +740,8 @@ export type FetchCatalogOptions =
       scope: "workspace";
       cwd: string;
       force: boolean;
-    };
+    }
+);
 
 export interface ProviderRefreshContext {
   readonly signal: AbortSignal;
@@ -748,6 +775,10 @@ export interface AgentClient {
     launchContext?: AgentLaunchContext,
     options?: AgentResumeSessionOptions,
   ): Promise<AgentSession>;
+  /** Equal keys share availability and catalogue discovery within this configured client.
+   * Include the execution environment and effective configuration; omit to use target identity.
+   * force must not affect identity. Resolve before every cache lookup. */
+  getCatalogCacheKey?(options: FetchCatalogOptions): Promise<string | undefined>;
   /**
    * Discover models and modes together. Implementations may use one upstream
    * process, separate upstream calls, static modes, or private helpers; callers
@@ -775,10 +806,10 @@ export interface AgentClient {
     context: ImportProviderSessionContext,
   ): Promise<ImportedProviderSession>;
   /**
-   * Check if this provider is available (CLI binary is installed).
+   * Check availability in the catalogue target when supplied (CLI binary is installed).
    * Returns true if available, false otherwise.
    */
-  isAvailable(signal?: AbortSignal): Promise<boolean>;
+  isAvailable(signal?: AbortSignal, options?: FetchCatalogOptions): Promise<boolean>;
   getDiagnostic?(): Promise<{ diagnostic: string }>;
   /**
    * Archive a durable native session (best-effort). Runtime release belongs to AgentSession.close().

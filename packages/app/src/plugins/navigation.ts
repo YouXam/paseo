@@ -1,5 +1,6 @@
+import { buildPluginSettingsRoute } from "./settings/routes";
 import { router } from "expo-router";
-import type { PluginPanelLocation } from "@getpaseo/plugin";
+import type { PluginPanelLocation } from "@getpaseo/plugin/client";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { buildPluginSurfaceRoute } from "./routes";
@@ -19,8 +20,13 @@ export function createPluginNavigation(input: {
     return { mode: "pane" as const, paneId };
   }
   return {
-    openSurface(pluginId, surfaceId) {
-      router.push(buildPluginSurfaceRoute(serverId, pluginId, { kind: "surface", id: surfaceId }));
+    openSettings(pluginId, screenId) {
+      router.push(buildPluginSettingsRoute(serverId, pluginId, screenId));
+    },
+    openSurface(pluginId, surfaceId, params) {
+      router.push(
+        buildPluginSurfaceRoute(serverId, pluginId, { kind: "surface", id: surfaceId }, params),
+      );
     },
     openWorkspacePanel(pluginId, panelId, location) {
       if (!workspaceId) throw new Error("No active workspace");

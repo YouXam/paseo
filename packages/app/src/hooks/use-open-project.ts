@@ -1,7 +1,8 @@
+import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { useCallback } from "react";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
-import { useSessionStore } from "@/stores/session-store";
+import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
 import {
   cloneGithubProjectDirectly,
   openProjectDirectly,
@@ -21,8 +22,21 @@ export function useOpenProject(
         state.sessions[normalizedServerId]?.serverInfo?.features?.stableProjectIdentity === true
       : false,
   );
-  const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
-  const upsertProject = useSessionStore((state) => state.upsertProject);
+  const mergeWorkspaces = useCallback(
+    (targetServerId: string, workspaces: Iterable<WorkspaceDescriptor>) => {
+      getHostRuntimeStore().acceptWorkspaceSnapshots(targetServerId, Array.from(workspaces));
+    },
+    [],
+  );
+  const upsertProject = useCallback(
+    (
+      targetServerId: string,
+      project: Parameters<ReturnType<typeof getHostRuntimeStore>["acceptProjectSnapshot"]>[1],
+    ) => {
+      getHostRuntimeStore().acceptProjectSnapshot(targetServerId, project);
+    },
+    [],
+  );
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -67,7 +81,15 @@ export function useCloneGithubProject(
   const normalizedServerId = serverId?.trim() ?? "";
   const client = useHostRuntimeClient(normalizedServerId);
   const isConnected = useHostRuntimeIsConnected(normalizedServerId);
-  const upsertProject = useSessionStore((state) => state.upsertProject);
+  const upsertProject = useCallback(
+    (
+      targetServerId: string,
+      project: Parameters<ReturnType<typeof getHostRuntimeStore>["acceptProjectSnapshot"]>[1],
+    ) => {
+      getHostRuntimeStore().acceptProjectSnapshot(targetServerId, project);
+    },
+    [],
+  );
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(

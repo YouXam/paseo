@@ -7,7 +7,7 @@ import type { AgentProfile } from "@getpaseo/protocol/messages";
 import { Button } from "@/components/ui/button";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
-import { SettingsSection } from "@/screens/settings/settings-section";
+import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { settingsStyles } from "@/styles/settings";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { confirmDialog } from "@/utils/confirm-dialog";
@@ -124,7 +124,6 @@ export function AgentProfilesSection({ serverId }: { serverId: string }): ReactE
     () => (
       <Button
         variant="ghost"
-        size="sm"
         leftIcon={addIcon}
         onPress={handleAddOpen}
         disabled={!profiles}
@@ -181,7 +180,7 @@ export function AgentProfilesSection({ serverId }: { serverId: string }): ReactE
               <Text style={styles.emptyText} testID="agent-profiles-empty">
                 {t("settings.host.agentProfiles.emptyState")}
               </Text>
-              <Button size="sm" leftIcon={addIcon} onPress={handleAddOpen} disabled={!profiles}>
+              <Button leftIcon={addIcon} onPress={handleAddOpen} disabled={!profiles}>
                 {t("settings.host.agentProfiles.newProfile")}
               </Button>
             </View>

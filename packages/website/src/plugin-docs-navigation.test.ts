@@ -1,43 +1,69 @@
 import { describe, expect, it } from "vitest";
-import { buildDocsNavTree, getDocs, getLegacyDocsRedirect } from "./docs";
+import { buildDocsNavTree, getDoc, getDocs, getLegacyDocsRedirect, parseHeadings } from "./docs";
 
-describe("versioned plugin documentation", () => {
-  it("keeps current and preview releases together in the Plugins navigation", () => {
-    const plugins = buildDocsNavTree(getDocs()).find(
+describe("plugin documentation", () => {
+  it.each(["en", "zh-CN"] as const)(
+    "nests local file copying under Git worktrees in %s",
+    (locale) => {
+      const workspaces = buildDocsNavTree(getDocs(locale)).find(
+        (node) => node.type === "category" && node.label === "Workspaces",
+      );
+      expect(workspaces).toMatchObject({
+        children: expect.arrayContaining([
+          expect.objectContaining({
+            type: "group",
+            href: "/docs/worktrees",
+            children: [expect.objectContaining({ href: "/docs/worktrees/worktreeinclude" })],
+          }),
+        ]),
+      });
+      expect(getDoc("worktrees/worktreeinclude", locale)).toBeDefined();
+    },
+  );
+
+  it("groups current guides by task without version navigation", () => {
+    const plugins = buildDocsNavTree(getDocs("en")).find(
       (node) => node.type === "category" && node.label === "Plugins",
     );
 
     expect(plugins).toMatchObject({
       type: "category",
       children: [
-        { type: "page", label: "Versions", href: "/docs/plugins" },
-        {
-          type: "group",
-          label: "Paseo v0.7 — Current",
-          href: "/docs/plugins/v0.7",
-          children: [{ type: "page", label: "Reference", href: "/docs/plugins/v0.7/reference" }],
-        },
-        {
-          type: "group",
-          label: "Paseo v0.8 — Preview",
-          href: "/docs/plugins/v0.8",
-          children: [
-            { type: "page", label: "Reference", href: "/docs/plugins/v0.8/reference" },
-            { type: "page", label: "Migration", href: "/docs/plugins/v0.8/migration" },
-          ],
-        },
+        { type: "page", label: "Quickstart", href: "/docs/plugins" },
+        { type: "page", label: "Publishing", href: "/docs/plugins/publishing" },
+        { type: "page", label: "Provider plugins", href: "/docs/plugins/providers" },
+        { type: "page", label: "Migration", href: "/docs/plugins/migration" },
+        { type: "page", label: "Hooks", href: "/docs/plugins/hooks" },
+        { type: "page", label: "Reference", href: "/docs/plugins/reference" },
       ],
     });
   });
 
-  it("keeps existing plugin documentation URLs working", () => {
-    expect(getLegacyDocsRedirect("/docs/plugins/reference")).toBe("/docs/plugins/v0.7/reference");
-    expect(getLegacyDocsRedirect("/docs/plugins/reference.md")).toBe(
-      "/docs/plugins/v0.7/reference.md",
+  it.each(["en", "zh-CN"] as const)("resolves worktree placement hook links in %s", (locale) => {
+    const hooks = getDoc("plugins/hooks", locale)!;
+    expect(parseHeadings(hooks.content).map((heading) => heading.id)).toContain(
+      "worktreecreatebefore",
     );
-    expect(getLegacyDocsRedirect("/docs/plugins/migration")).toBe("/docs/plugins/v0.8/migration");
-    expect(getLegacyDocsRedirect("/docs/plugins/migration.md")).toBe(
-      "/docs/plugins/v0.8/migration.md",
-    );
+    expect(hooks.content).toContain("plugin-examples/worktree-placement");
+  });
+
+  it.each(["v0.7", "v0.8"])("redirects %s links to existing current pages", (version) => {
+    for (const page of ["", "/index", "/reference", "/providers", "/migration"]) {
+      const target = `/docs/plugins${page === "/index" ? "" : page}`;
+      expect(getDoc(target.slice("/docs/".length), "en")).toBeDefined();
+      for (const extension of ["", ".md"]) {
+        const source = `/docs/plugins/${version}${page}${extension}`;
+        expect(getLegacyDocsRedirect(source)).toBe(`${target}${extension}`);
+        expect(getLegacyDocsRedirect(`${source}/`)).toBe(`${target}${extension}`);
+      }
+    }
+  });
+
+  it("serves canonical pages without redirect loops", () => {
+    for (const page of ["", "/publishing", "/reference", "/providers", "/migration", "/hooks"]) {
+      expect(getLegacyDocsRedirect(`/docs/plugins${page}`)).toBeUndefined();
+      expect(getLegacyDocsRedirect(`/docs/plugins${page}.md`)).toBeUndefined();
+    }
+    expect(getLegacyDocsRedirect("/docs/plugins/v0.8/unknown")).toBeUndefined();
   });
 });
