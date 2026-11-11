@@ -167,6 +167,16 @@ interface WorkspaceLayoutStore {
     workspaceKey: string,
     resolvePlacement: () => Pick<OpenWorkspaceTabInput, "placement" | "insertionPosition">,
   ) => string | null;
+  /**
+   * Adds `target` in the background the first time `onceKey` is seen for the workspace, like
+   * PR detection does for its tab. A tab the user closed is never added again.
+   */
+  autoOpenTabOnce: (input: {
+    workspaceKey: string;
+    onceKey: string;
+    target: WorkspaceTabTarget;
+    resolvePlacement: () => Pick<OpenWorkspaceTabInput, "placement" | "insertionPosition">;
+  }) => string | null;
   /** Reveals the Explorer sidebar without selecting a view. Returns its pane id. */
   ensureExplorerSidebar: (workspaceKey: string) => string | null;
   showExplorerSidebar: (workspaceKey: string) => string | null;
@@ -960,6 +970,17 @@ function sheetAgentNoLongerFits(
  * Splits an Explorer sidebar out of the pane the user is in. Only reached by layouts saved
  * before the Explorer became part of the default tree; new ones are born with it.
  */
+// Other once-per-workspace tabs share the PR record as "<workspaceKey>#<onceKey>". The persisted
+// schema is strict, so a new slice would make older builds reject (and wipe) the stored layout;
+// a record of string keys reads fine everywhere.
+function autoOpenedTabRecordKey(workspaceKey: string, onceKey: string): string {
+  return `${workspaceKey}#${onceKey}`;
+}
+
+function isAutoOpenedTabRecordOf(recordKey: string, workspaceKey: string): boolean {
+  return recordKey === workspaceKey || recordKey.startsWith(`${workspaceKey}#`);
+}
+
 function createExplorerSidebarPane(
   workspaceKey: string,
   layout: WorkspaceLayout,
@@ -1055,6 +1076,28 @@ export function createWorkspaceLayoutStore(
               pullRequestTabAutoOpenedByWorkspace: {
                 ...state.pullRequestTabAutoOpenedByWorkspace,
                 [key]: true,
+              },
+            }));
+          }
+          return tabId;
+        },
+        autoOpenTabOnce: ({ workspaceKey, onceKey, target, resolvePlacement }) => {
+          const key = trimNonEmpty(workspaceKey);
+          const once = trimNonEmpty(onceKey);
+          if (!key || !once) return null;
+          const recordKey = autoOpenedTabRecordKey(key, once);
+          if (get().pullRequestTabAutoOpenedByWorkspace[recordKey]) return null;
+          const tabId = get().openTab({
+            workspaceKey: key,
+            target,
+            intent: "background",
+            ...resolvePlacement(),
+          });
+          if (tabId) {
+            set((state) => ({
+              pullRequestTabAutoOpenedByWorkspace: {
+                ...state.pullRequestTabAutoOpenedByWorkspace,
+                [recordKey]: true,
               },
             }));
           }
@@ -2241,17 +2284,20 @@ export function createWorkspaceLayoutStore(
               normalizedWorkspaceKey in state.focusRestorationByWorkspace ||
               normalizedWorkspaceKey in state.explorerSidebarPaneIdByWorkspace ||
               normalizedWorkspaceKey in state.sidePaneIdByWorkspace ||
-              normalizedWorkspaceKey in state.pullRequestTabAutoOpenedByWorkspace ||
+              Object.keys(state.pullRequestTabAutoOpenedByWorkspace).some((key) =>
+                isAutoOpenedTabRecordOf(key, normalizedWorkspaceKey),
+              ) ||
               normalizedWorkspaceKey in state.sheetsByWorkspace;
             if (!hasAny) {
               return state;
             }
             const { [normalizedWorkspaceKey]: _pendingOpen, ...pendingOpenByWorkspace } =
               state.pendingOpenByWorkspace;
-            const {
-              [normalizedWorkspaceKey]: _autoOpened,
-              ...pullRequestTabAutoOpenedByWorkspace
-            } = state.pullRequestTabAutoOpenedByWorkspace;
+            const pullRequestTabAutoOpenedByWorkspace = Object.fromEntries(
+              Object.entries(state.pullRequestTabAutoOpenedByWorkspace).filter(
+                ([key]) => !isAutoOpenedTabRecordOf(key, normalizedWorkspaceKey),
+              ),
+            );
             const { [normalizedWorkspaceKey]: _layout, ...layoutByWorkspace } =
               state.layoutByWorkspace;
             const { [normalizedWorkspaceKey]: _splits, ...splitSizesByWorkspace } =

@@ -132,3 +132,55 @@ export function autoOpenWorkspacePullRequest(input: {
     };
   });
 }
+
+/**
+ * Adds a plugin panel's tab once per workspace without revealing or selecting it, the way PR
+ * detection adds its tab. Waits for the stored layout so the record and tab are not overwritten.
+ */
+export function autoOpenWorkspacePluginPanel(input: {
+  workspaceKey: string;
+  pluginId: string;
+  panelId: string;
+  location: "explorer" | "workspace";
+}): void {
+  const run = () => {
+    const store = useWorkspaceLayoutStore.getState();
+    const { workspaceKey } = input;
+    store.autoOpenTabOnce({
+      workspaceKey,
+      onceKey: `plugin:${input.pluginId}/${input.panelId}`,
+      target: {
+        kind: "plugin",
+        pluginId: input.pluginId,
+        panelId: input.panelId,
+        context: "workspace",
+      },
+      resolvePlacement: () => {
+        const layout =
+          store.layoutByWorkspace[workspaceKey] ?? createWorkspaceLayoutWithExplorerSidebar();
+        const explorerPaneId = resolveExplorerSidebarPaneId(
+          layout,
+          store.explorerSidebarPaneIdByWorkspace[workspaceKey],
+        );
+        if (input.location === "explorer") {
+          return {
+            placement: explorerPaneId ? { mode: "prefer", paneId: explorerPaneId } : undefined,
+          };
+        }
+        const panes = collectAllPanes(layout.root);
+        const mainPane =
+          panes.find((pane) => pane.id === DEFAULT_PANE_ID) ??
+          panes.find((pane) => pane.id !== explorerPaneId && !pane.hidden);
+        return { placement: mainPane ? { mode: "prefer", paneId: mainPane.id } : undefined };
+      },
+    });
+  };
+  if (useWorkspaceLayoutStore.persist.hasHydrated()) {
+    run();
+    return;
+  }
+  const stop = useWorkspaceLayoutStore.persist.onFinishHydration(() => {
+    stop();
+    run();
+  });
+}

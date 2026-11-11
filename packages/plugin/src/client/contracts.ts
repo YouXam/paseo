@@ -210,6 +210,12 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   ): PluginCleanup;
   openPanel(id: string, options: PluginClientOpenPanelOptions): void;
   /**
+   * Adds a workspace panel's tab without navigating to the workspace, showing the Explorer, or
+   * selecting the tab, the way Paseo adds a detected pull request. Each workspace gets the tab
+   * once; a tab the user closed is not added again. Older Paseo versions lack it, so check first.
+   */
+  autoOpenPanel?(id: string, options: PluginClientOpenPanelOptions): void;
+  /**
    * Subscribes to a plugin subscription on this client's host. Paseo re-subscribes after a
    * reconnect and releases what is left when the plugin stops.
    */

@@ -12,6 +12,8 @@ import { createPluginClientStateSource } from "./client-state/source";
 import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
 import { pluginButtonStore } from "./buttons";
+import { resolvePluginPanelOpenLocation } from "./workspace-panels/locations";
+import { autoOpenWorkspacePluginPanel } from "@/workspace-tabs/open-supporting-view";
 import type { InstalledPlugin } from "./types";
 
 export function createPluginClientRuntime(
@@ -36,6 +38,20 @@ export function createPluginClientRuntime(
     },
     openPanel(panelId, options) {
       openClientPanel({ installation, state, panelId, options });
+    },
+    autoOpenPanel(panelId, options) {
+      const workspaceId = options.workspaceId.trim();
+      const panel = installation.workspacePanels.find(
+        (candidate) => candidate.id === panelId && candidate.context === "workspace",
+      );
+      if (!workspaceId || !panel) throw new Error(`Workspace panel is unavailable: ${panelId}`);
+      const location = resolvePluginPanelOpenLocation(panel, options.location);
+      autoOpenWorkspacePluginPanel({
+        workspaceKey: `${installation.serverId}:${workspaceId}`,
+        pluginId: installation.id,
+        panelId,
+        location: location === "explorer" ? "explorer" : "workspace",
+      });
     },
     subscribe: (contract, input, onEvent, options) =>
       subscribePluginRpc(contract, installation.subscribe, input, onEvent, options),

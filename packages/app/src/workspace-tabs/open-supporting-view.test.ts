@@ -17,6 +17,7 @@ import {
   useWorkspaceLayoutStore,
 } from "@/stores/workspace-layout-store";
 import {
+  autoOpenWorkspacePluginPanel,
   autoOpenWorkspacePullRequest,
   openComposerChanges,
   openWorkspaceChanges,
@@ -222,6 +223,48 @@ describe("autoOpenWorkspacePullRequest", () => {
         (tab) => tab.target.kind,
       ),
     ).not.toContain("pull_request");
+  });
+});
+
+describe("autoOpenWorkspacePluginPanel", () => {
+  const panel = { pluginId: "gitlab-mr", panelId: "merge-request", location: "explorer" as const };
+
+  it("silently adds the plugin tab to the Explorer once and never restores it after closing", () => {
+    const store = useWorkspaceLayoutStore.getState();
+    store.openTab({
+      workspaceKey: WORKSPACE_KEY,
+      target: { kind: "agent", agentId: "agent-1" },
+      intent: "reveal",
+    });
+    const before = useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY];
+    autoOpenWorkspacePluginPanel({ workspaceKey: WORKSPACE_KEY, ...panel });
+    const after = useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY];
+    const explorer = findPaneById(after.root, "explorer")!;
+    const pluginTab = collectAllTabs(after.root).find((tab) => tab.target.kind === "plugin");
+    expect(explorer.tabIds).toContain(pluginTab?.tabId);
+    expect(explorer.hidden).toBe(true);
+    expect(explorer.focusedTabId).toBe(findPaneById(before.root, "explorer")!.focusedTabId);
+    expect(after.focusedPaneId).toBe(before.focusedPaneId);
+
+    store.closeTab(WORKSPACE_KEY, pluginTab!.tabId);
+    autoOpenWorkspacePluginPanel({ workspaceKey: WORKSPACE_KEY, ...panel });
+    expect(
+      collectAllTabs(useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY].root).some(
+        (tab) => tab.target.kind === "plugin",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps its record apart from PR detection and drops both when the workspace is purged", () => {
+    const store = useWorkspaceLayoutStore.getState();
+    autoOpenWorkspacePluginPanel({ workspaceKey: WORKSPACE_KEY, ...panel });
+    autoOpenWorkspacePullRequest({ workspaceKey: WORKSPACE_KEY, destination: "explorer" });
+    const kinds = collectAllTabs(
+      useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY].root,
+    ).map((tab) => tab.target.kind);
+    expect(kinds).toEqual(expect.arrayContaining(["plugin", "pull_request"]));
+    store.purgeWorkspace(WORKSPACE_KEY);
+    expect(useWorkspaceLayoutStore.getState().pullRequestTabAutoOpenedByWorkspace).toEqual({});
   });
 });
 
