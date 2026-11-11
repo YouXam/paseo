@@ -38,6 +38,7 @@ export type {
   PluginWorkspaceCommandContext,
   PluginAgentCommandContext,
   PluginCommandCenterItemContribution,
+  PluginLinkHandlerContribution,
   PluginClientSlashCommandContribution,
   SettingsState,
 } from "./contracts.js";

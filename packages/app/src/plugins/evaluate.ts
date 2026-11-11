@@ -112,6 +112,7 @@ export type PluginClientRuntime = Pick<
   | "openSurface"
   | "openPanel"
   | "autoOpenPanel"
+  | "addLinkHandler"
   | "subscribe"
   | "addComposerPill"
   | "addHeaderButton"

@@ -216,6 +216,11 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
    */
   autoOpenPanel?(id: string, options: PluginClientOpenPanelOptions): void;
   /**
+   * Takes over links pressed in Markdown on this plugin's host, before Paseo opens them in the
+   * browser. `open` returns true when it handled the link. Older Paseo versions lack it.
+   */
+  addLinkHandler?(contribution: PluginLinkHandlerContribution): PluginCleanup;
+  /**
    * Subscribes to a plugin subscription on this client's host. Paseo re-subscribes after a
    * reconnect and releases what is left when the plugin stops.
    */
@@ -247,6 +252,14 @@ export interface PluginAgentPanelContribution<
   Text extends PluginText = string,
 > extends PluginWorkspacePanelBase<Text> {
   Component: ComponentType<PluginAgentPanelProps>;
+}
+
+export interface PluginLinkHandlerContribution {
+  id: string;
+  /** Whether the plugin wants this absolute http(s) URL. Called on every press; keep it cheap. */
+  matches(url: string): boolean;
+  /** `workspaceDirectory` is the directory of the workspace the link was pressed in, if any. */
+  open(input: { url: string; workspaceDirectory: string | null }): boolean;
 }
 
 export interface PluginSettingsScreenContribution<Text extends PluginText = string> {

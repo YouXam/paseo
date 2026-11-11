@@ -9,6 +9,7 @@ import { useStableEvent } from "@/hooks/use-stable-event";
 import { matchCommandLink, useAgentCommandHints, type CommandHints } from "@/agent-commands";
 import { useForgeShorthand } from "@/git/forge-shorthand";
 import { openExternalUrl } from "@/utils/open-external-url";
+import { openPluginLink } from "@/plugins/links";
 import { AttachmentLightbox, type ImageLightboxSource } from "@/components/attachment-lightbox";
 import type { Theme } from "@/styles/theme";
 import { isWeb } from "@/constants/platform";
@@ -115,6 +116,12 @@ const MarkdownPart = memo(function MarkdownPart({
       return;
     }
     const forgeUrl = sourceType === "text" ? forgeShorthand?.resolve(url) : null;
+    const pluginLink = {
+      url: forgeUrl ?? url,
+      serverId: environment.serverId,
+      workspaceDirectory: environment.workspaceRoot,
+    };
+    if (openPluginLink(pluginLink)) return;
     if (forgeUrl) {
       void openExternalUrl(forgeUrl);
       return;
