@@ -221,6 +221,11 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
    */
   addLinkHandler?(contribution: PluginLinkHandlerContribution): PluginCleanup;
   /**
+   * Context for a workspace's chat, shown as attachments in its composer like the pull request
+   * panel's "Add to chat". Older Paseo versions lack it.
+   */
+  chatContext?: PluginChatContextApi;
+  /**
    * Subscribes to a plugin subscription on this client's host. Paseo re-subscribes after a
    * reconnect and releases what is left when the plugin stops.
    */
@@ -252,6 +257,28 @@ export interface PluginAgentPanelContribution<
   Text extends PluginText = string,
 > extends PluginWorkspacePanelBase<Text> {
   Component: ComponentType<PluginAgentPanelProps>;
+}
+
+export interface PluginChatContextItem {
+  /** Stable within the plugin: adding the same id again replaces the item. */
+  id: string;
+  kind: "comment" | "review" | "check";
+  title: string;
+  subtitle?: string;
+  /** What the agent receives. */
+  text: string;
+  url?: string;
+}
+
+export interface PluginChatContextApi {
+  add(input: { workspaceId: string; item: PluginChatContextItem }): void;
+  /** The items this plugin added that are still waiting in the workspace's chat. */
+  list(workspaceId: string): PluginChatContextItem[];
+  subscribe(workspaceId: string, listener: (items: PluginChatContextItem[]) => void): PluginCleanup;
+  remove(workspaceId: string, id: string): void;
+  clear(workspaceId: string): void;
+  /** Sends this plugin's waiting items to an agent with `text`, then removes them. */
+  send(input: { workspaceId: string; agentId: string; text: string }): Promise<void>;
 }
 
 export interface PluginLinkHandlerContribution {

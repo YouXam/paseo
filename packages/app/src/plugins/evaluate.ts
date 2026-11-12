@@ -113,6 +113,7 @@ export type PluginClientRuntime = Pick<
   | "openPanel"
   | "autoOpenPanel"
   | "addLinkHandler"
+  | "chatContext"
   | "subscribe"
   | "addComposerPill"
   | "addHeaderButton"
